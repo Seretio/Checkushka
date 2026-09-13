@@ -16,10 +16,10 @@ from aiogram.types import (
 )
 
 # === НАСТРОЙКИ ===
-BOT_TOKEN = "YOUR_BOT_TOKEN"  # Токен вашего бота[cite: 3]
-BOT_USERNAME = "YOUR_BOT_USERNAME"  # Username бота БЕЗ символа @[cite: 3]
+BOT_TOKEN = "8950292427:AAHiJ26IAGA4cTwC4OAnJU3DxZUVE8Ld7xg"  # Токен вашего бота[cite: 3]
+BOT_USERNAME = "Checkushhka_Bot"  # Username бота БЕЗ символа @[cite: 3]
 DB_NAME = "chekushka.db"[cite: 3]
-ADMIN_IDS = [123456789]  # Укажите ваш Telegram ID (число)[cite: 3]
+ADMIN_IDS = [7837011810]  # Укажите ваш Telegram ID (число)[cite: 3]
 
 logging.basicConfig(level=logging.INFO)[cite: 3]
 bot = Bot(token=BOT_TOKEN)[cite: 3]
