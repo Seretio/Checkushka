@@ -13,9 +13,11 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
     LabeledPrice,
     Message,
     PreCheckoutQuery,
+    ReplyKeyboardMarkup,
 )
 import os
 
@@ -208,47 +210,21 @@ async def update_balance(user_id: int, amount: int):
         await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
         await db.commit()
 
-# === АВТО-ПИНГ ПОЛЬЗОВАТЕЛЕЙ (КАЖДЫЕ 5 МИНУТ) ===
-async def auto_ping_task():
-    """Фоновая рассылка сообщений раз в 5 минут."""
-    await asyncio.sleep(10)
-    while True:
-        try:
-            async with aiosqlite.connect(DB_NAME) as db:
-                db.row_factory = aiosqlite.Row
-                async with db.execute("SELECT user_id FROM users WHERE is_banned = 0") as cursor:
-                    users = await cursor.fetchall()
-
-            for user in users:
-                try:
-                    await bot.send_message(
-                        chat_id=user["user_id"],
-                        text="🔔 **Напоминание!** Заходи сыграть в «Чекушку»! Проверь свой баланс и играй! 🚀",
-                        parse_mode="Markdown"
-                    )
-                    await asyncio.sleep(0.05)
-                except Exception:
-                    pass
-        except Exception as e:
-            logging.error(f"Ошибка при авто-пинге: {e}")
-
-        await asyncio.sleep(300)
-
 # === КЛАВИАТУРЫ ===
-def main_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
-            [InlineKeyboardButton(text="💎 Пополнить", callback_data="deposit")],
-            [InlineKeyboardButton(text="играть", callback_data="games")],
-        ]
+def main_reply_keyboard():
+    """Нижняя обычная клавиатура."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="🎮 Играть")]
+        ],
+        resize_keyboard=True
     )
 
-def profile_keyboard():
+def profile_inline_keyboard():
+    """Инлайн-кнопка пополнения под сообщением профиля."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💎 Пополнить", callback_data="deposit")],
-            [InlineKeyboardButton(text="◀️ Назад", callback_data="main_menu")],
+            [InlineKeyboardButton(text="💎 Пополнить", callback_data="deposit")]
         ]
     )
 
@@ -259,7 +235,6 @@ def deposit_keyboard():
             [InlineKeyboardButton(text="💎 100 — 60 ⭐", callback_data="buy_100")],
             [InlineKeyboardButton(text="💎 200 — 120 ⭐", callback_data="buy_200")],
             [InlineKeyboardButton(text="💎 300 — 180 ⭐", callback_data="buy_300")],
-            [InlineKeyboardButton(text="◀️ Назад", callback_data="main_menu")],
         ]
     )
 
@@ -269,7 +244,6 @@ def games_keyboard():
             [InlineKeyboardButton(text="⚽ Футбол", callback_data="game_football")],
             [InlineKeyboardButton(text="🏀 Баскетбол", callback_data="game_basketball")],
             [InlineKeyboardButton(text="🎯 Дартс", callback_data="game_darts")],
-            [InlineKeyboardButton(text="◀️ Назад", callback_data="main_menu")],
         ]
     )
 
@@ -293,25 +267,47 @@ async def cmd_start(message: Message, command: CommandObject):
         await message.answer("❌ Вы заблокированы в боте.")
         return
 
-    await message.answer(MAIN_TEXT, reply_markup=main_keyboard())
+    await message.answer(MAIN_TEXT, reply_markup=main_reply_keyboard())
 
-@dp.callback_query(F.data == "main_menu")
-async def cb_main_menu(call: CallbackQuery):
-    await call.message.edit_text(MAIN_TEXT, reply_markup=main_keyboard())
-    await call.answer()
+# === ПРОФИЛЬ (ВЫЗОВ ПО НИЖНЕЙ КНОПКЕ) ===
+@dp.message(F.text == "👤 Профиль")
+async def msg_profile(message: Message):
+    user = await get_user(message.from_user.id)
+    if not user:
+        user = await get_or_create_user(
+            user_id=message.from_user.id,
+            first_name=message.from_user.first_name,
+            username=message.from_user.username
+        )
 
-# === ПРОФИЛЬ ===
-@dp.callback_query(F.data == "profile")
-async def cb_profile(call: CallbackQuery):
-    user = await get_user(call.from_user.id)
+    if user['is_banned']:
+        await message.answer("❌ Вы заблокированы в боте.")
+        return
+
     text = (
-        "👤 Ваш профиль\n"
+        "👤 **Ваш профиль**\n"
         f"├ 👤 {user['first_name']}\n"
-        f"├ 🆔 ID: {user['user_id']}\n"
+        f"├ 🆔 ID: `{user['user_id']}`\n"
         f"└ 💎 Чекушок: {user['balance']}"
     )
-    await call.message.edit_text(text, reply_markup=profile_keyboard())
-    await call.answer()
+    await message.answer(text, parse_mode="Markdown", reply_markup=profile_inline_keyboard())
+
+# === ИГРАТЬ (ВЫЗОВ ПО НИЖНЕЙ КНОПКЕ) ===
+@dp.message(F.text == "🎮 Играть")
+async def msg_games(message: Message):
+    user = await get_user(message.from_user.id)
+    if user and user['is_banned']:
+        await message.answer("❌ Вы заблокированы в боте.")
+        return
+
+    text = (
+        "🎮 Выберите игру ниже:\n\n"
+        "Чтобы сделать ставку, отправьте команду с игрой и суммой ставки:\n"
+        "• `баскетбол 5`\n"
+        "• `футбол 1`\n"
+        "• `дартс 500`"
+    )
+    await message.answer(text, parse_mode="Markdown", reply_markup=games_keyboard())
 
 # === ПОПОЛНЕНИЕ И STARS ===
 PACKAGES = {
@@ -365,7 +361,7 @@ async def process_successful_payment(message: Message):
         f"💎 Вам начислено: {added_amount} Чекушек\n"
         f"💎 Ваш баланс: {user['balance']} Чекушек"
     )
-    await message.answer(text, reply_markup=main_keyboard())
+    await message.answer(text, reply_markup=main_reply_keyboard())
 
 # === РЕФЕРАЛЬНАЯ СИСТЕМА ===
 @dp.message(Command("ref"))
@@ -389,7 +385,7 @@ async def cmd_ref(message: Message):
     )
     await message.answer(text)
 
-# === ФАЙЛ С ПОЛЬЗОВАТЕЛЯМИ (ВЫГРУЗКА И СИНХРОНИЗАЦИЯ ВРУЧНУЮ) ===
+# === ФАЙЛ С ПОЛЬЗОВАТЕЛЯМИ ===
 @dp.message(Command("export"))
 async def cmd_export(message: Message):
     if message.from_user.id not in ADMIN_IDS:
@@ -556,18 +552,6 @@ async def cmd_broadcast(message: Message, command: CommandObject):
     await message.answer(f"📢 **Рассылка завершена:**\n✅ Успешно: {success}\n❌ Не доставлено: {failed}")
 
 # === ИГРЫ (ФУТБОЛ, БАСКЕТБОЛ, ДАРТС) ===
-@dp.callback_query(F.data == "games")
-async def cb_games(call: CallbackQuery):
-    text = (
-        "🎮 Выберите игру ниже:\n\n"
-        "Чтобы сделать ставку, отправьте команду с игрой и суммой ставки:\n"
-        "• `баскетбол 5`\n"
-        "• `футбол 1`\n"
-        "• `дартс 500`"
-    )
-    await call.message.edit_text(text, parse_mode="Markdown", reply_markup=games_keyboard())
-    await call.answer()
-
 @dp.callback_query(F.data.startswith("game_"))
 async def cb_game_info(call: CallbackQuery):
     game_type = call.data.split("_")[1]
@@ -654,7 +638,6 @@ async def main():
     await init_db()
     
     await start_http_server()                # Запуск HTTP-сервера для Render
-    asyncio.create_task(auto_ping_task())     # Авто-пинг каждые 5 минут
     asyncio.create_task(github_sync_task())   # Авто-сохранение в GitHub каждые 10 минут
     
     print("Бот запущен с синхронизацией GitHub и HTTP-сервером!")
