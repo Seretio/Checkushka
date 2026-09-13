@@ -34,6 +34,9 @@ GITHUB_OWNER = os.getenv("GITHUB_OWNER", "Seretio")
 GITHUB_REPO = os.getenv("GITHUB_REPO", "Checkushka")
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
 
+# Защита от одновременных записей БД в GitHub.
+github_sync_lock = asyncio.Lock()
+
 PORT = int(os.getenv("PORT", 8080))
 
 logging.basicConfig(level=logging.INFO)
@@ -77,48 +80,77 @@ async def download_db_from_github():
                 logging.info("Файл базы данных не найден на GitHub, создаём локально.")
 
 async def upload_db_to_github():
-    """Сохранение БД в GitHub."""
-    if not GITHUB_TOKEN or not os.path.exists(DB_NAME):
-        return
+    """Мгновенно сохраняет актуальную SQLite-БД в GitHub."""
+    if not GITHUB_TOKEN:
+        logging.warning("GITHUB_TOKEN не задан, синхронизация отключена.")
+        return False
 
-    url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{DB_NAME}"
-    headers = {
-        "Authorization": f"token {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github.v3+json",
-    }
-    
-    sha = None
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f"{url}?ref={GITHUB_BRANCH}", headers=headers) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                sha = data.get("sha")
+    if not os.path.exists(DB_NAME):
+        logging.warning(f"Файл БД не найден: {DB_NAME}")
+        return False
 
-        with open(DB_NAME, "rb") as f:
-            content = base64.b64encode(f.read()).decode("utf-8")
-
-        payload = {
-            "message": "Auto-sync database update",
-            "content": content,
-            "branch": GITHUB_BRANCH,
+    async with github_sync_lock:
+        url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{DB_NAME}"
+        headers = {
+            "Authorization": f"Bearer {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
         }
-        if sha:
-            payload["sha"] = sha
 
-        async with session.put(url, headers=headers, json=payload) as resp:
-            if resp.status in [200, 201]:
-                logging.info("База данных успешно отправлена в GitHub!")
-            else:
-                logging.error(f"Ошибка при загрузке базы в GitHub: {await resp.text()}")
+        try:
+            async with aiohttp.ClientSession() as session:
+                sha = None
+
+                async with session.get(
+                    f"{url}?ref={GITHUB_BRANCH}",
+                    headers=headers
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        sha = data.get("sha")
+                    elif resp.status != 404:
+                        logging.error(
+                            f"GitHub: ошибка получения SHA: "
+                            f"{resp.status} {await resp.text()}"
+                        )
+                        return False
+
+                with open(DB_NAME, "rb") as f:
+                    content = base64.b64encode(f.read()).decode("utf-8")
+
+                payload = {
+                    "message": "Auto-save database",
+                    "content": content,
+                    "branch": GITHUB_BRANCH,
+                }
+                if sha:
+                    payload["sha"] = sha
+
+                async with session.put(url, headers=headers, json=payload) as resp:
+                    if resp.status in (200, 201):
+                        logging.info("✅ База сразу сохранена в GitHub.")
+                        return True
+
+                    logging.error(
+                        f"❌ Ошибка сохранения БД: "
+                        f"{resp.status} {await resp.text()}"
+                    )
+                    return False
+
+        except Exception as e:
+            logging.exception(f"❌ Ошибка GitHub-сохранения: {e}")
+            return False
+
 
 async def github_sync_task():
-    """Авто-сохранение БД в GitHub каждые 10 минут."""
+    """Резервная синхронизация БД каждые 10 минут."""
     while True:
         await asyncio.sleep(600)
         try:
             await upload_db_to_github()
         except Exception as e:
             logging.error(f"Ошибка фоновой синхронизации с GitHub: {e}")
+
 
 # === ИНИЦИАЛИЗА БАЗЫ ДАННЫХ ===
 async def init_db():
@@ -185,6 +217,9 @@ async def get_or_create_user(user_id: int, first_name: str, username: str = None
             async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cursor:
                 user = await cursor.fetchone()
 
+            # Создание пользователя/реферала уже commit'нуто — сохраняем сразу.
+            await upload_db_to_github()
+
         return user
 
 async def get_user_by_id_or_username(identifier: str):
@@ -207,8 +242,15 @@ async def get_user(user_id: int):
 
 async def update_balance(user_id: int, amount: int):
     async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
+        await db.execute(
+            "UPDATE users SET balance = balance + ? WHERE user_id = ?",
+            (amount, user_id)
+        )
         await db.commit()
+
+    # Сохраняем баланс сразу после изменения.
+    await upload_db_to_github()
+
 
 # === КЛАВИАТУРЫ ===
 def main_reply_keyboard():
@@ -410,7 +452,7 @@ async def cmd_sync(message: Message):
     if message.from_user.id not in ADMIN_IDS:
         return
     await upload_db_to_github()
-    await message.answer("🔄 База данных вручную сохранена в GitHub!")
+    await message.answer("✅ Актуальная база данных сохранена в GitHub!")
 
 # === АДМИН-КОМАНДЫ ДЛЯ УПРАВЛЕНИЯ БАЛАНСОМ ===
 @dp.message(F.from_user.id.in_(ADMIN_IDS) & F.text)
@@ -517,6 +559,7 @@ async def cmd_ban(message: Message, command: CommandObject):
         async with aiosqlite.connect(DB_NAME) as db:
             await db.execute("UPDATE users SET is_banned = 1 WHERE user_id = ?", (user['user_id'],))
             await db.commit()
+        await upload_db_to_github()
         await message.answer(f"⛔ Пользователь {user['first_name']} заблокирован.")
 
 @dp.message(Command("unban"))
@@ -528,6 +571,7 @@ async def cmd_unban(message: Message, command: CommandObject):
         async with aiosqlite.connect(DB_NAME) as db:
             await db.execute("UPDATE users SET is_banned = 0 WHERE user_id = ?", (user['user_id'],))
             await db.commit()
+        await upload_db_to_github()
         await message.answer(f"✅ Пользователь {user['first_name']} разблокирован.")
 
 @dp.message(Command("broadcast"))
@@ -634,13 +678,18 @@ async def process_game_bet(message: Message):
 
 # === ЗАПУСК ===
 async def main():
-    await download_db_from_github()  # Загружаем последнюю версию БД с GitHub
+    # Восстанавливаем последнюю сохранённую БД.
+    await download_db_from_github()
     await init_db()
-    
-    await start_http_server()                # Запуск HTTP-сервера для Render
-    asyncio.create_task(github_sync_task())   # Авто-сохранение в GitHub каждые 10 минут
-    
-    print("Бот запущен с синхронизацией GitHub и HTTP-сервером!")
+
+    # Если БД только что создана — сразу сохраняем её в GitHub.
+    await upload_db_to_github()
+
+    await start_http_server()
+    # Дополнительная страховка раз в 10 минут.
+    asyncio.create_task(github_sync_task())
+
+    print("Бот запущен. Изменения БД сохраняются в GitHub сразу после записи.")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
