@@ -352,7 +352,7 @@ async def cb_buy_package(call: CallbackQuery):
 async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery):
     await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
 
-@dp.successful_payment()
+@dp.message(F.successful_payment)
 async def process_successful_payment(message: Message):
     payload = message.successful_payment.invoice_payload
     added_amount = int(payload.split("_")[1])
