@@ -1,6 +1,5 @@
 import asyncio
 import base64
-import io
 import logging
 import random
 import aiosqlite
@@ -34,16 +33,14 @@ GITHUB_OWNER = os.getenv("GITHUB_OWNER", "Seretio")
 GITHUB_REPO = os.getenv("GITHUB_REPO", "Checkushka")
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
 
-# Защита от одновременных записей БД в GitHub.
 github_sync_lock = asyncio.Lock()
-
 PORT = int(os.getenv("PORT", 8080))
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# === МИНИМАЛЬНЫЙ HTTP-СЕРВЕР ДЛЯ RENDER ===
+# === МИНИМАЛЬНЫЙ HTTP-СЕРВЕР ===
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
 
@@ -58,9 +55,8 @@ async def start_http_server():
 
 # === СИНХРОНИЗАЦИЯ С GITHUB ===
 async def download_db_from_github():
-    """Загрузка БД из GitHub при старте бота."""
     if not GITHUB_TOKEN:
-        logging.warning("GITHUB_TOKEN не задан, синхронизация с GitHub отключена.")
+        logging.warning("GITHUB_TOKEN не задан, синхронизация отключена.")
         return
 
     url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{DB_NAME}?ref={GITHUB_BRANCH}"
@@ -77,16 +73,13 @@ async def download_db_from_github():
                     f.write(content)
                 logging.info("База данных успешно загружена из GitHub!")
             else:
-                logging.info("Файл базы данных не найден на GitHub, создаём локально.")
+                logging.info("Файл БД не найден на GitHub, создаём локально.")
 
 async def upload_db_to_github():
-    """Мгновенно сохраняет актуальную SQLite-БД в GitHub."""
     if not GITHUB_TOKEN:
-        logging.warning("GITHUB_TOKEN не задан, синхронизация отключена.")
         return False
 
     if not os.path.exists(DB_NAME):
-        logging.warning(f"Файл БД не найден: {DB_NAME}")
         return False
 
     async with github_sync_lock:
@@ -100,20 +93,10 @@ async def upload_db_to_github():
         try:
             async with aiohttp.ClientSession() as session:
                 sha = None
-
-                async with session.get(
-                    f"{url}?ref={GITHUB_BRANCH}",
-                    headers=headers
-                ) as resp:
+                async with session.get(f"{url}?ref={GITHUB_BRANCH}", headers=headers) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         sha = data.get("sha")
-                    elif resp.status != 404:
-                        logging.error(
-                            f"GitHub: ошибка получения SHA: "
-                            f"{resp.status} {await resp.text()}"
-                        )
-                        return False
 
                 with open(DB_NAME, "rb") as f:
                     content = base64.b64encode(f.read()).decode("utf-8")
@@ -127,32 +110,20 @@ async def upload_db_to_github():
                     payload["sha"] = sha
 
                 async with session.put(url, headers=headers, json=payload) as resp:
-                    if resp.status in (200, 201):
-                        logging.info("✅ База сразу сохранена в GitHub.")
-                        return True
-
-                    logging.error(
-                        f"❌ Ошибка сохранения БД: "
-                        f"{resp.status} {await resp.text()}"
-                    )
-                    return False
-
+                    return resp.status in (200, 201)
         except Exception as e:
-            logging.exception(f"❌ Ошибка GitHub-сохранения: {e}")
+            logging.exception(f"Ошибка GitHub-сохранения: {e}")
             return False
 
-
 async def github_sync_task():
-    """Резервная синхронизация БД каждые 10 минут."""
     while True:
         await asyncio.sleep(600)
         try:
             await upload_db_to_github()
-        except Exception as e:
-            logging.error(f"Ошибка фоновой синхронизации с GitHub: {e}")
+        except Exception:
+            pass
 
-
-# === ИНИЦИАЛИЗА БАЗЫ ДАННЫХ ===
+# === ИНИЦИАЛИЗА БД ===
 async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute(
@@ -171,7 +142,6 @@ async def init_db():
         )
         await db.commit()
 
-# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ БАЗЫ ===
 async def get_or_create_user(user_id: int, first_name: str, username: str = None, referrer_id: int = None):
     async with aiosqlite.connect(DB_NAME) as db:
         db.row_factory = aiosqlite.Row
@@ -180,43 +150,26 @@ async def get_or_create_user(user_id: int, first_name: str, username: str = None
 
         if not user:
             valid_referrer = referrer_id if referrer_id and referrer_id != user_id else None
-            
             if valid_referrer:
                 async with db.execute("SELECT user_id FROM users WHERE user_id = ?", (valid_referrer,)) as c:
                     if not await c.fetchone():
                         valid_referrer = None
 
             await db.execute(
-                """
-                INSERT INTO users (user_id, first_name, username, referrer_id)
-                VALUES (?, ?, ?, ?)
-            """,
+                "INSERT INTO users (user_id, first_name, username, referrer_id) VALUES (?, ?, ?, ?)",
                 (user_id, first_name, username, valid_referrer),
             )
             await db.commit()
 
             if valid_referrer:
                 await db.execute(
-                    """
-                    UPDATE users 
-                    SET balance = balance + 1, ref_count = ref_count + 1, ref_balance = ref_balance + 1 
-                    WHERE user_id = ?
-                """,
+                    "UPDATE users SET balance = balance + 1, ref_count = ref_count + 1, ref_balance = ref_balance + 1 WHERE user_id = ?",
                     (valid_referrer,),
                 )
                 await db.commit()
-                
-                try:
-                    await bot.send_message(
-                        chat_id=valid_referrer,
-                        text="🎉 Друг перешёл по твоей ссылке! Ты получаешь 1 💎 Чекушку."
-                    )
-                except Exception:
-                    pass
 
             async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cursor:
                 user = await cursor.fetchone()
-
             await upload_db_to_github()
 
         return user
@@ -225,7 +178,6 @@ async def get_user_by_id_or_username(identifier: str):
     async with aiosqlite.connect(DB_NAME) as db:
         db.row_factory = aiosqlite.Row
         identifier = identifier.replace("@", "").strip()
-        
         if identifier.isdigit():
             async with db.execute("SELECT * FROM users WHERE user_id = ?", (int(identifier),)) as cursor:
                 return await cursor.fetchone()
@@ -241,32 +193,19 @@ async def get_user(user_id: int):
 
 async def update_balance(user_id: int, amount: int):
     async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute(
-            "UPDATE users SET balance = balance + ? WHERE user_id = ?",
-            (amount, user_id)
-        )
+        await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
         await db.commit()
-
     await upload_db_to_github()
-
 
 # === КЛАВИАТУРЫ ===
 def main_reply_keyboard():
-    """Нижняя обычная клавиатура."""
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="🎮 Играть")]
-        ],
+        keyboard=[[KeyboardButton(text="👤 Профиль"), KeyboardButton(text="🎮 Играть")]],
         resize_keyboard=True
     )
 
 def profile_inline_keyboard():
-    """Инлайн-кнопка пополнения под сообщением профиля."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="💎 Пополнить", callback_data="deposit")]
-        ]
-    )
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💎 Пополнить", callback_data="deposit")]])
 
 def deposit_keyboard():
     return InlineKeyboardMarkup(
@@ -287,15 +226,10 @@ def games_keyboard():
         ]
     )
 
-# === МЕНЮ И СТАРТ ===
-MAIN_TEXT = "Привет! 👋 Добро пожаловать в «Чекушку»!\nВыберите действие ниже 👇"
-
+# === СТАРТ И ОСНОВНОЕ МЕНЮ ===
 @dp.message(CommandStart())
 async def cmd_start(message: Message, command: CommandObject):
-    referrer_id = None
-    if command.args and command.args.isdigit():
-        referrer_id = int(command.args)
-
+    referrer_id = int(command.args) if command.args and command.args.isdigit() else None
     user = await get_or_create_user(
         user_id=message.from_user.id,
         first_name=message.from_user.first_name,
@@ -307,18 +241,13 @@ async def cmd_start(message: Message, command: CommandObject):
         await message.answer("❌ Вы заблокированы в боте.")
         return
 
-    await message.answer(MAIN_TEXT, reply_markup=main_reply_keyboard())
+    await message.answer("Привет! 👋 Добро пожаловать в «Чекушку»!\nВыберите действие ниже 👇", reply_markup=main_reply_keyboard())
 
-# === ПРОФИЛЬ (ВЫЗОВ ПО НИЖНЕЙ КНОПКЕ) ===
 @dp.message(F.text == "👤 Профиль")
 async def msg_profile(message: Message):
     user = await get_user(message.from_user.id)
     if not user:
-        user = await get_or_create_user(
-            user_id=message.from_user.id,
-            first_name=message.from_user.first_name,
-            username=message.from_user.username
-        )
+        user = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
 
     if user['is_banned']:
         await message.answer("❌ Вы заблокированы в боте.")
@@ -332,7 +261,6 @@ async def msg_profile(message: Message):
     )
     await message.answer(text, parse_mode="Markdown", reply_markup=profile_inline_keyboard())
 
-# === ИГРАТЬ (ВЫЗОВ ПО НИЖНЕЙ КНОПКЕ) ===
 @dp.message(F.text == "🎮 Играть")
 async def msg_games(message: Message):
     user = await get_user(message.from_user.id)
@@ -349,7 +277,7 @@ async def msg_games(message: Message):
     )
     await message.answer(text, parse_mode="Markdown", reply_markup=games_keyboard())
 
-# === ПОПОЛНЕНИЕ И STARS ===
+# === ПОПОЛНЕНИЕ ===
 PACKAGES = {
     "buy_50": {"amount": 50, "stars": 30, "title": "50 Чекушек"},
     "buy_100": {"amount": 100, "stars": 60, "title": "100 Чекушек"},
@@ -372,7 +300,6 @@ async def cb_deposit(call: CallbackQuery):
 @dp.callback_query(F.data.in_(PACKAGES.keys()))
 async def cb_buy_package(call: CallbackQuery):
     pkg = PACKAGES[call.data]
-    
     await bot.send_invoice(
         chat_id=call.from_user.id,
         title=pkg["title"],
@@ -392,216 +319,59 @@ async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery):
 async def process_successful_payment(message: Message):
     payload = message.successful_payment.invoice_payload
     added_amount = int(payload.split("_")[1])
-
     await update_balance(message.from_user.id, added_amount)
     user = await get_user(message.from_user.id)
+    await message.answer(f"✅ Пополнение успешно!\n💎 Баланс: {user['balance']} Чекушек", reply_markup=main_reply_keyboard())
 
-    text = (
-        "✅ Пополнение успешно!\n"
-        f"💎 Вам начислено: {added_amount} Чекушек\n"
-        f"💎 Ваш баланс: {user['balance']} Чекушек"
-    )
-    await message.answer(text, reply_markup=main_reply_keyboard())
-
-# === РЕФЕРАЛЬНАЯ СИСТЕМА ===
-@dp.message(Command("ref"))
-async def cmd_ref(message: Message):
-    user = await get_or_create_user(
-        user_id=message.from_user.id,
-        first_name=message.from_user.first_name,
-        username=message.from_user.username,
-    )
-    ref_link = f"https://t.me/{BOT_USERNAME}?start={message.from_user.id}"
-    
-    text = (
-        "👥 Реферальная система\n\n"
-        "Приглашай друзей и получай Чекушки!\n"
-        "🎁 За каждого приглашённого друга ты получаешь 1 💎 Чекушку.\n\n"
-        "🔗 Твоя личная ссылка:\n"
-        f"{ref_link}\n\n"
-        f"👥 Приглашено: {user['ref_count']}\n"
-        f"💎 Получено: {user['ref_balance']}\n\n"
-        "Отправь свою ссылку друзьям и получай Чекушки! 🚀"
-    )
-    await message.answer(text)
-
-# === ФАЙЛ С ПОЛЬЗОВАТЕЛЯМИ ===
-@dp.message(Command("export"))
-async def cmd_export(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM users") as cursor:
-            users = await cursor.fetchall()
-
-    file_content = "ID | USERNAME | FIRST_NAME | BALANCE | REF_COUNT | REFERRER_ID\n"
-    file_content += "=" * 65 + "\n"
-    for u in users:
-        un = f"@{u['username']}" if u['username'] else "None"
-        file_content += f"{u['user_id']} | {un} | {u['first_name']} | {u['balance']} | {u['ref_count']} | {u['referrer_id']}\n"
-
-    input_file = BufferedInputFile(file_content.encode("utf-8"), filename="users_data.txt")
-    await message.answer_document(input_file, caption="📄 Полный список пользователей бота.")
-
-@dp.message(Command("sync"))
-async def cmd_sync(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    await upload_db_to_github()
-    await message.answer("✅ Актуальная база данных сохранена в GitHub!")
-
-# === АДМИН-КОМАНДЫ ДЛЯ УПРАВЛЕНИЯ БАЛАНСОМ ===
+# === ИСПРАВЛЕННЫЙ АДМИН-ОБРАБОТЧИК ===
 @dp.message(F.from_user.id.in_(ADMIN_IDS) & F.text)
 async def process_admin_text_commands(message: Message):
     text = message.text.strip()
     parts = text.split()
 
-    action = None
-    amount = 0
-    target_str = None
+    action, amount, target_str = None, 0, None
 
     if len(parts) >= 3 and parts[0].lower() in ["чекушка", "выдать", "+"]:
-        action = "add"
         if parts[1].isdigit():
-            amount = int(parts[1])
-            target_str = parts[2]
+            action, amount, target_str = "add", int(parts[1]), parts[2]
     elif len(parts) >= 3 and parts[0].lower() in ["забрать", "снять", "-"]:
-        action = "sub"
         if parts[1].isdigit():
-            amount = int(parts[1])
-            target_str = parts[2]
+            action, amount, target_str = "sub", int(parts[1]), parts[2]
     
     if message.reply_to_message and len(parts) >= 2:
         if parts[0].lower() in ["чекушка", "выдать", "+"] and parts[1].isdigit():
-            action = "add"
-            amount = int(parts[1])
-            target_str = str(message.reply_to_message.from_user.id)
+            action, amount, target_str = "add", int(parts[1]), str(message.reply_to_message.from_user.id)
         elif parts[0].lower() in ["забрать", "снять", "-"] and parts[1].isdigit():
-            action = "sub"
-            amount = int(parts[1])
-            target_str = str(message.reply_to_message.from_user.id)
+            action, amount, target_str = "sub", int(parts[1]), str(message.reply_to_message.from_user.id)
 
-    if action and amount > 0 and target_str:
-        target_user = await get_user_by_id_or_username(target_str)
-        if not target_user:
-            await message.answer("❌ Пользователь не найден в базе бота.")
-            return
-
-        if action == "add":
-            await update_balance(target_user['user_id'], amount)
-            new_user = await get_user(target_user['user_id'])
-            await message.answer(f"✅ Выдали {amount} 💎 Чекушек пользователю {target_user['first_name']}.")
-            try:
-                await bot.send_message(
-                    chat_id=target_user['user_id'],
-                    text=f"🎁 Вам выдано {amount} 💎 Чекушек администратором!\nВаш баланс: {new_user['balance']} 💎"
-                )
-            except Exception:
-                pass
-
-        elif action == "sub":
-            await update_balance(target_user['user_id'], -amount)
-            new_user = await get_user(target_user['user_id'])
-            await message.answer(f"⚠️ Забрали {amount} 💎 Чекушек у пользователя {target_user['first_name']}.")
-            try:
-                await bot.send_message(
-                    chat_id=target_user['user_id'],
-                    text=f"🔻 У вас забрали {amount} 💎 Чекушек.\nВаш баланс: {new_user['balance']} 💎"
-                )
-            except Exception:
-                pass
-
-# === ВСЕ АДМИНСКИЕ КОМАНДЫ ===
-@dp.message(Command("admin"))
-async def cmd_admin(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
+    # ЕСЛИ ЭТО НЕ АДМИН-КОМАНДА — ПЕРЕДАЕМ УПРАВЛЕНИЕ ИГРАМ (ВАЖНО!)
+    if not action or amount <= 0 or not target_str:
+        await process_game_bet(message)
         return
-    text = (
-        "🛠 **Панель Администратора**\n\n"
-        "**Управление балансом:**\n"
-        "• `Чекушка 50 @username` — выдать 50 Чекушек\n"
-        "• `Забрать 20 @username` — забрать 20 Чекушек\n\n"
-        "**Команды админа:**\n"
-        "• `/export` — Скачать файл с пользователями\n"
-        "• `/sync` — Синхронизировать БД с GitHub вручную\n"
-        "• `/stats` — Общая статистика\n"
-        "• `/ban [ID/@username]` — Заблокировать\n"
-        "• `/unban [ID/@username]` — Разблокировать\n"
-        "• `/broadcast [текст]` — Рассылка"
-    )
-    await message.answer(text, parse_mode="Markdown")
 
-@dp.message(Command("stats"))
-async def cmd_stats(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
+    target_user = await get_user_by_id_or_username(target_str)
+    if not target_user:
+        await message.answer("❌ Пользователь не найден в базе бота.")
         return
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT COUNT(*), SUM(balance) FROM users") as cursor:
-            row = await cursor.fetchone()
-            count = row[0] or 0
-            total_balance = row[1] or 0
 
-    await message.answer(f"📊 **Статистика:**\n\n👥 Пользователей: {count}\n💎 Всего Чекушек в системе: {total_balance}")
+    if action == "add":
+        await update_balance(target_user['user_id'], amount)
+        await message.answer(f"✅ Выдали {amount} 💎 Чекушек пользователю {target_user['first_name']}.")
+    elif action == "sub":
+        await update_balance(target_user['user_id'], -amount)
+        await message.answer(f"⚠️ Забрали {amount} 💎 Чекушек у пользователя {target_user['first_name']}.")
 
-@dp.message(Command("ban"))
-async def cmd_ban(message: Message, command: CommandObject):
-    if message.from_user.id not in ADMIN_IDS or not command.args:
-        return
-    user = await get_user_by_id_or_username(command.args)
-    if user:
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("UPDATE users SET is_banned = 1 WHERE user_id = ?", (user['user_id'],))
-            await db.commit()
-        await upload_db_to_github()
-        await message.answer(f"⛔ Пользователь {user['first_name']} заблокирован.")
-
-@dp.message(Command("unban"))
-async def cmd_unban(message: Message, command: CommandObject):
-    if message.from_user.id not in ADMIN_IDS or not command.args:
-        return
-    user = await get_user_by_id_or_username(command.args)
-    if user:
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("UPDATE users SET is_banned = 0 WHERE user_id = ?", (user['user_id'],))
-            await db.commit()
-        await upload_db_to_github()
-        await message.answer(f"✅ Пользователь {user['first_name']} разблокирован.")
-
-@dp.message(Command("broadcast"))
-async def cmd_broadcast(message: Message, command: CommandObject):
-    if message.from_user.id not in ADMIN_IDS or not command.args:
-        return
-    
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT user_id FROM users") as cursor:
-            users = await cursor.fetchall()
-
-    success, failed = 0, 0
-    for u in users:
-        try:
-            await bot.send_message(chat_id=u['user_id'], text=command.args)
-            success += 1
-            await asyncio.sleep(0.05)
-        except Exception:
-            failed += 1
-
-    await message.answer(f"📢 **Рассылка завершена:**\n✅ Успешно: {success}\n❌ Не доставлено: {failed}")
-
-# === ИГРЫ (ФУТБОЛ, БАСКЕТБОЛ, ДАРТС - ДОСТУПНО ДЛЯ ВСЕХ И В ГРУППАХ) ===
+# === ИГРОВОЙ ОБРАБОТЧИК ===
 @dp.callback_query(F.data.startswith("game_"))
 async def cb_game_info(call: CallbackQuery):
     game_type = call.data.split("_")[1]
     names = {"football": "футбол", "basketball": "баскетбол", "darts": "дартс"}
-    name = names.get(game_type, "игру")
-    await call.message.answer(f"Чтобы сыграть, напишите в чат: `{name} [ставка]`\nНапример: `{name} 10`", parse_mode="Markdown")
+    await call.message.answer(f"Чтобы сыграть, напишите в чат: `{names.get(game_type, 'игру')} [ставка]`\nНапример: `{names.get(game_type, 'игру')} 10`", parse_mode="Markdown")
     await call.answer()
 
 @dp.message(F.text)
 async def process_game_bet(message: Message):
-    # Очистка текста от упоминания бота (для работы в группах)
+    # Удаляем юзернейм бота, если команда отправлена в группе с упоминанием
     raw_text = message.text.replace(f"@{BOT_USERNAME}", "").strip()
     parts = raw_text.split()
     
@@ -661,17 +431,13 @@ async def process_game_bet(message: Message):
         new_user = await get_user(message.from_user.id)
         
         await message.answer(
-            f"🎉 **ПОБЕДА!**\n"
-            f"Вам начислено: +{win_amount} 💎 Чекушек!\n"
-            f"Ваш баланс: {new_user['balance']} 💎",
+            f"🎉 **ПОБЕДА!**\nВам начислено: +{win_amount} 💎 Чекушек!\nВаш баланс: {new_user['balance']} 💎",
             parse_mode="Markdown"
         )
     else:
         new_user = await get_user(message.from_user.id)
         await message.answer(
-            f"❌ **ПРОИГРЫШ!**\n"
-            f"Вы потеряли: {bet} 💎 Чекушек.\n"
-            f"Ваш баланс: {new_user['balance']} 💎",
+            f"❌ **ПРОИГРЫШ!**\nВы потеряли: {bet} 💎 Чекушек.\nВаш баланс: {new_user['balance']} 💎",
             parse_mode="Markdown"
         )
 
@@ -683,8 +449,7 @@ async def main():
     await start_http_server()
     asyncio.create_task(github_sync_task())
 
-    print("Бот запущен. Изменения БД сохраняются в GitHub сразу после записи.")
-    # Разрешаем получать все типы сообщений из групп и каналов
+    print("Бот запущен!")
     await dp.start_polling(bot, allowed_updates=["message", "callback_query", "pre_checkout_query"])
 
 if __name__ == "__main__":
