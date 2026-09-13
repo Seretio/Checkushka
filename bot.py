@@ -5,6 +5,7 @@ import logging
 import random
 import aiosqlite
 import aiohttp
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
@@ -31,9 +32,24 @@ GITHUB_OWNER = os.getenv("GITHUB_OWNER", "Seretio")
 GITHUB_REPO = os.getenv("GITHUB_REPO", "Checkushka")
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
 
+PORT = int(os.getenv("PORT", 8080))
+
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+# === МИНИМАЛЬНЫЙ HTTP-СЕРВЕР ДЛЯ RENDER ===
+async def handle_ping(request):
+    return web.Response(text="Bot is running!")
+
+async def start_http_server():
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    logging.info(f"HTTP-сервер запущен на порту {PORT}")
 
 # === СИНХРОНИЗАЦИЯ С GITHUB ===
 async def download_db_from_github():
@@ -637,10 +653,11 @@ async def main():
     await download_db_from_github()  # Загружаем последнюю версию БД с GitHub
     await init_db()
     
+    await start_http_server()                # Запуск HTTP-сервера для Render
     asyncio.create_task(auto_ping_task())     # Авто-пинг каждые 5 минут
     asyncio.create_task(github_sync_task())   # Авто-сохранение в GitHub каждые 10 минут
     
-    print("Бот запущен с синхронизацией GitHub!")
+    print("Бот запущен с синхронизацией GitHub и HTTP-сервером!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
