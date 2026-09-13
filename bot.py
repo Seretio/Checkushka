@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import io
 import logging
 import random
 import aiosqlite
@@ -243,7 +244,8 @@ async def cmd_start(message: Message, command: CommandObject):
 
     await message.answer("Привет! 👋 Добро пожаловать в «Чекушку»!\nВыберите действие ниже 👇", reply_markup=main_reply_keyboard())
 
-@dp.message(F.text == "👤 Профиль")
+# === ОБРАБОТКА КОМАНД В ЧАТАХ И ГРУППАХ ===
+@dp.message(F.text.lower().in_(["чекушка", "👤 профиль"]))
 async def msg_profile(message: Message):
     user = await get_user(message.from_user.id)
     if not user:
@@ -254,14 +256,12 @@ async def msg_profile(message: Message):
         return
 
     text = (
-        "👤 **Ваш профиль**\n"
-        f"├ 👤 {user['first_name']}\n"
-        f"├ 🆔 ID: `{user['user_id']}`\n"
-        f"└ 💎 Чекушок: {user['balance']}"
+        f"Имя: {user['first_name']}\n"
+        f"у нас чекушек {user['balance']}"
     )
-    await message.answer(text, parse_mode="Markdown", reply_markup=profile_inline_keyboard())
+    await message.answer(text, reply_markup=profile_inline_keyboard())
 
-@dp.message(F.text == "🎮 Играть")
+@dp.message(F.text.lower().in_(["играть", "🎮 играть"]))
 async def msg_games(message: Message):
     user = await get_user(message.from_user.id)
     if user and user['is_banned']:
@@ -277,7 +277,18 @@ async def msg_games(message: Message):
     )
     await message.answer(text, parse_mode="Markdown", reply_markup=games_keyboard())
 
-# === ПОПОЛНЕНИЕ ===
+@dp.message(F.text.lower() == "пополнить")
+async def msg_deposit(message: Message):
+    text = (
+        "💎 Выберите количество Чекушек\n"
+        "├ 💎 50 Чекушек — 30 ⭐\n"
+        "├ 💎 100 Чекушек — 60 ⭐\n"
+        "├ 💎 200 Чекушек — 120 ⭐\n"
+        "└ 💎 300 Чекушек — 180 ⭐"
+    )
+    await message.answer(text, reply_markup=deposit_keyboard())
+
+# === ПОПОЛНЕНИЕ СТАРЗ ===
 PACKAGES = {
     "buy_50": {"amount": 50, "stars": 30, "title": "50 Чекушек"},
     "buy_100": {"amount": 100, "stars": 60, "title": "100 Чекушек"},
@@ -323,7 +334,7 @@ async def process_successful_payment(message: Message):
     user = await get_user(message.from_user.id)
     await message.answer(f"✅ Пополнение успешно!\n💎 Баланс: {user['balance']} Чекушек", reply_markup=main_reply_keyboard())
 
-# === ИСПРАВЛЕННЫЙ АДМИН-ОБРАБОТЧИК ===
+# === АДМИН-ОБРАБОТЧИК ===
 @dp.message(F.from_user.id.in_(ADMIN_IDS) & F.text)
 async def process_admin_text_commands(message: Message):
     text = message.text.strip()
@@ -344,7 +355,6 @@ async def process_admin_text_commands(message: Message):
         elif parts[0].lower() in ["забрать", "снять", "-"] and parts[1].isdigit():
             action, amount, target_str = "sub", int(parts[1]), str(message.reply_to_message.from_user.id)
 
-    # ЕСЛИ ЭТО НЕ АДМИН-КОМАНДА — ПЕРЕДАЕМ УПРАВЛЕНИЕ ИГРАМ (ВАЖНО!)
     if not action or amount <= 0 or not target_str:
         await process_game_bet(message)
         return
@@ -371,7 +381,6 @@ async def cb_game_info(call: CallbackQuery):
 
 @dp.message(F.text)
 async def process_game_bet(message: Message):
-    # Удаляем юзернейм бота, если команда отправлена в группе с упоминанием
     raw_text = message.text.replace(f"@{BOT_USERNAME}", "").strip()
     parts = raw_text.split()
     
