@@ -103,7 +103,7 @@ async def github_sync_task():
             logging.error(f"Ошибка фоновой синхронизации с GitHub: {e}")
 
 # === ИНИЦИАЛИЗА БАЗЫ ДАННЫХ ===
-async def init_db():[cite: 3]
+async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:[cite: 3]
         await db.execute([cite: 3]
             """
