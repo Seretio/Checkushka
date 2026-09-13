@@ -217,7 +217,6 @@ async def get_or_create_user(user_id: int, first_name: str, username: str = None
             async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cursor:
                 user = await cursor.fetchone()
 
-            # Создание пользователя/реферала уже commit'нуто — сохраняем сразу.
             await upload_db_to_github()
 
         return user
@@ -248,7 +247,6 @@ async def update_balance(user_id: int, amount: int):
         )
         await db.commit()
 
-    # Сохраняем баланс сразу после изменения.
     await upload_db_to_github()
 
 
@@ -592,7 +590,7 @@ async def cmd_broadcast(message: Message, command: CommandObject):
 
     await message.answer(f"📢 **Рассылка завершена:**\n✅ Успешно: {success}\n❌ Не доставлено: {failed}")
 
-# === ИГРЫ (ФУТБОЛ, БАСКЕТБОЛ, ДАРТС - ДОСТУПНО ДЛЯ ВСЕХ) ===
+# === ИГРЫ (ФУТБОЛ, БАСКЕТБОЛ, ДАРТС - ДОСТУПНО ДЛЯ ВСЕХ И В ГРУППАХ) ===
 @dp.callback_query(F.data.startswith("game_"))
 async def cb_game_info(call: CallbackQuery):
     game_type = call.data.split("_")[1]
@@ -603,11 +601,14 @@ async def cb_game_info(call: CallbackQuery):
 
 @dp.message(F.text)
 async def process_game_bet(message: Message):
-    parts = message.text.strip().lower().split()
+    # Очистка текста от упоминания бота (для работы в группах)
+    raw_text = message.text.replace(f"@{BOT_USERNAME}", "").strip()
+    parts = raw_text.split()
+    
     if len(parts) != 2:
         return
 
-    game_name, bet_str = parts[0], parts[1]
+    game_name, bet_str = parts[0].lower(), parts[1]
     game_map = {"футбол": ("⚽", "football"), "баскетбол": ("🏀", "basketball"), "дартс": ("🎯", "darts")}
 
     if game_name not in game_map or not bet_str.isdigit():
@@ -676,19 +677,15 @@ async def process_game_bet(message: Message):
 
 # === ЗАПУСК ===
 async def main():
-    # Восстанавливаем последнюю сохранённую БД.
     await download_db_from_github()
     await init_db()
-
-    # Если БД только что создана — сразу сохраняем её в GitHub.
     await upload_db_to_github()
-
     await start_http_server()
-    # Дополнительная страховка раз в 10 минут.
     asyncio.create_task(github_sync_task())
 
     print("Бот запущен. Изменения БД сохраняются в GitHub сразу после записи.")
-    await dp.start_polling(bot)
+    # Разрешаем получать все типы сообщений из групп и каналов
+    await dp.start_polling(bot, allowed_updates=["message", "callback_query", "pre_checkout_query"])
 
 if __name__ == "__main__":
     asyncio.run(main())
