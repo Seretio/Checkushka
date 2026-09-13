@@ -514,9 +514,6 @@ async def process_admin_text_commands(message: Message):
                 )
             except Exception:
                 pass
-        return
-
-    await process_game_bet(message)
 
 # === ВСЕ АДМИНСКИЕ КОМАНДЫ ===
 @dp.message(Command("admin"))
@@ -595,7 +592,7 @@ async def cmd_broadcast(message: Message, command: CommandObject):
 
     await message.answer(f"📢 **Рассылка завершена:**\n✅ Успешно: {success}\n❌ Не доставлено: {failed}")
 
-# === ИГРЫ (ФУТБОЛ, БАСКЕТБОЛ, ДАРТС) ===
+# === ИГРЫ (ФУТБОЛ, БАСКЕТБОЛ, ДАРТС - ДОСТУПНО ДЛЯ ВСЕХ) ===
 @dp.callback_query(F.data.startswith("game_"))
 async def cb_game_info(call: CallbackQuery):
     game_type = call.data.split("_")[1]
@@ -604,6 +601,7 @@ async def cb_game_info(call: CallbackQuery):
     await call.message.answer(f"Чтобы сыграть, напишите в чат: `{name} [ставка]`\nНапример: `{name} 10`", parse_mode="Markdown")
     await call.answer()
 
+@dp.message(F.text)
 async def process_game_bet(message: Message):
     parts = message.text.strip().lower().split()
     if len(parts) != 2:
