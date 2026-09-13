@@ -1,15 +1,14 @@
 import asyncio
 import base64
-import io
 import logging
+import os
 import random
-import aiosqlite
 import aiohttp
+import aiosqlite
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command, CommandObject, CommandStart
+from aiogram.filters import CommandObject, CommandStart
 from aiogram.types import (
-    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -19,7 +18,6 @@ from aiogram.types import (
     PreCheckoutQuery,
     ReplyKeyboardMarkup,
 )
-import os
 
 # === НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ===
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8950292427:AAHiJ26IAGA4cTwC4OAnJU3DxZUVE8Ld7xg")
@@ -412,6 +410,7 @@ async def process_game_bet(message: Message):
         await message.answer(f"❌ Недостаточно Чекушек! Ваш баланс: {user['balance']} 💎")
         return
 
+    # Списываем ставку перед броском
     await update_balance(message.from_user.id, -bet)
     
     emoji, game_code = game_map[game_name]
@@ -428,19 +427,22 @@ async def process_game_bet(message: Message):
         is_win = True
 
     if is_win:
+        # Коэффициент возврата с учётом прибыли
         if bet < 10:
-            win_amount = int(bet * random.uniform(1.5, 3.0))
+            coeff = random.uniform(1.8, 2.5)
         elif bet < 100:
-            win_amount = int(bet * random.uniform(1.2, 1.8))
+            coeff = random.uniform(1.4, 1.8)
         else:
-            win_amount = int(bet * random.uniform(0.4, 0.6))
-            
-        win_amount = max(1, win_amount)
-        await update_balance(message.from_user.id, win_amount)
+            coeff = random.uniform(1.2, 1.5)
+
+        # Выигрыш включает и возврат ставки, и прибыль
+        total_payout = int(bet * coeff)
+        await update_balance(message.from_user.id, total_payout)
         new_user = await get_user(message.from_user.id)
         
+        profit = total_payout - bet
         await message.answer(
-            f"🎉 **ПОБЕДА!**\nВам начислено: +{win_amount} 💎 Чекушек!\nВаш баланс: {new_user['balance']} 💎",
+            f"🎉 **ПОБЕДА!**\nВыигрыш: +{total_payout} 💎 Чекушек (Прибыль: +{profit} 💎)!\nВаш баланс: {new_user['balance']} 💎",
             parse_mode="Markdown"
         )
     else:
