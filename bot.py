@@ -243,7 +243,7 @@ async def cmd_start(message: Message, command: CommandObject):
     await message.answer("Привет! 👋 Добро пожаловать в «Чекушку»!\nВыберите действие ниже 👇", reply_markup=main_reply_keyboard())
 
 # === ОБРАБОТКА КОМАНД В ЧАТАХ И ГРУППАХ ===
-@dp.message(F.text.lower().in_(["чекушка", "👤 профиль"]))
+@dp.message(F.text.lower().in_(["чекушка", "профиль", "👤 профиль"]))
 async def msg_profile(message: Message):
     user = await get_user(message.from_user.id)
     if not user:
@@ -254,10 +254,12 @@ async def msg_profile(message: Message):
         return
 
     text = (
-        f"Имя: {user['first_name']}\n"
-        f"у нас чекушек {user['balance']}"
+        "👤 **Ваш профиль**\n"
+        f"├ 👤 {user['first_name']}\n"
+        f"├ 🆔 ID: `{user['user_id']}`\n"
+        f"└ 💎 Чекушок: {user['balance']}"
     )
-    await message.answer(text, reply_markup=profile_inline_keyboard())
+    await message.answer(text, parse_mode="Markdown", reply_markup=profile_inline_keyboard())
 
 @dp.message(F.text.lower().in_(["играть", "🎮 играть"]))
 async def msg_games(message: Message):
@@ -410,7 +412,6 @@ async def process_game_bet(message: Message):
         await message.answer(f"❌ Недостаточно Чекушек! Ваш баланс: {user['balance']} 💎")
         return
 
-    # Списываем ставку перед броском
     await update_balance(message.from_user.id, -bet)
     
     emoji, game_code = game_map[game_name]
@@ -427,7 +428,6 @@ async def process_game_bet(message: Message):
         is_win = True
 
     if is_win:
-        # Коэффициент возврата с учётом прибыли
         if bet < 10:
             coeff = random.uniform(1.8, 2.5)
         elif bet < 100:
@@ -435,7 +435,6 @@ async def process_game_bet(message: Message):
         else:
             coeff = random.uniform(1.2, 1.5)
 
-        # Выигрыш включает и возврат ставки, и прибыль
         total_payout = int(bet * coeff)
         await update_balance(message.from_user.id, total_payout)
         new_user = await get_user(message.from_user.id)
