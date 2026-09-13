@@ -1,8 +1,10 @@
 import asyncio
+import base64
 import io
 import logging
 import random
 import aiosqlite
+import aiohttp
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
@@ -14,16 +16,91 @@ from aiogram.types import (
     Message,
     PreCheckoutQuery,
 )
+import os
 
-# === НАСТРОЙКИ ===
-BOT_TOKEN = "8950292427:AAHiJ26IAGA4cTwC4OAnJU3DxZUVE8Ld7xg"  # Токен вашего бота[cite: 3]
-BOT_USERNAME = "Checkushhka_Bot"  # Username бота БЕЗ символа @[cite: 3]
-DB_NAME = "chekushka.db"[cite: 3]
-ADMIN_IDS = [7837011810]  # Укажите ваш Telegram ID (число)[cite: 3]
+# === НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ===
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8950292427:AAHiJ26IAGA4cTwC4OAnJU3DxZUVE8Ld7xg")
+BOT_USERNAME = os.getenv("BOT_USERNAME", "Checkushhka_Bot")
+DB_NAME = os.getenv("DB_NAME", "chekushka.db")
 
-logging.basicConfig(level=logging.INFO)[cite: 3]
-bot = Bot(token=BOT_TOKEN)[cite: 3]
-dp = Dispatcher()[cite: 3]
+admin_raw = os.getenv("ADMIN_IDS", "7837011810")
+ADMIN_IDS = [int(i.strip()) for i in admin_raw.split(",") if i.strip().isdigit()]
+
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+GITHUB_OWNER = os.getenv("GITHUB_OWNER", "Seretio")
+GITHUB_REPO = os.getenv("GITHUB_REPO", "Checkushka")
+GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
+
+logging.basicConfig(level=logging.INFO)
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
+# === СИНХРОНИЗАЦИЯ С GITHUB ===
+async def download_db_from_github():
+    """Загрузка БД из GitHub при старте бота."""
+    if not GITHUB_TOKEN:
+        logging.warning("GITHUB_TOKEN не задан, синхронизация с GitHub отключена.")
+        return
+
+    url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{DB_NAME}?ref={GITHUB_BRANCH}"
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                content = base64.b64decode(data["content"])
+                with open(DB_NAME, "wb") as f:
+                    f.write(content)
+                logging.info("База данных успешно загружена из GitHub!")
+            else:
+                logging.info("Файл базы данных не найден на GitHub, создаём локально.")
+
+async def upload_db_to_github():
+    """Сохранение БД в GitHub."""
+    if not GITHUB_TOKEN or not os.path.exists(DB_NAME):
+        return
+
+    url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{DB_NAME}"
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    
+    sha = None
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"{url}?ref={GITHUB_BRANCH}", headers=headers) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                sha = data.get("sha")
+
+        with open(DB_NAME, "rb") as f:
+            content = base64.b64encode(f.read()).decode("utf-8")
+
+        payload = {
+            "message": "Auto-sync database update",
+            "content": content,
+            "branch": GITHUB_BRANCH,
+        }
+        if sha:
+            payload["sha"] = sha
+
+        async with session.put(url, headers=headers, json=payload) as resp:
+            if resp.status in [200, 201]:
+                logging.info("База данных успешно отправлена в GitHub!")
+            else:
+                logging.error(f"Ошибка при загрузке базы в GitHub: {await resp.text()}")
+
+async def github_sync_task():
+    """Авто-сохранение БД в GitHub каждые 10 минут."""
+    while True:
+        await asyncio.sleep(600)
+        try:
+            await upload_db_to_github()
+        except Exception as e:
+            logging.error(f"Ошибка фоновой синхронизации с GitHub: {e}")
 
 # === ИНИЦИАЛИЗА БАЗЫ ДАННЫХ ===
 async def init_db():[cite: 3]
@@ -117,8 +194,8 @@ async def update_balance(user_id: int, amount: int):[cite: 3]
 
 # === АВТО-ПИНГ ПОЛЬЗОВАТЕЛЕЙ (КАЖДЫЕ 5 МИНУТ) ===
 async def auto_ping_task():
-    """Фоновая рассылка сообщений раз в 5 минут (300 секунд)."""
-    await asyncio.sleep(10)  # Небольшая пауза при старте
+    """Фоновая рассылка сообщений раз в 5 минут."""
+    await asyncio.sleep(10)
     while True:
         try:
             async with aiosqlite.connect(DB_NAME) as db:
@@ -130,16 +207,16 @@ async def auto_ping_task():
                 try:
                     await bot.send_message(
                         chat_id=user["user_id"],
-                        text="🔔 **Напоминание!** Заходи сыграть в «Чекушку»! Проверь свой баланс и сыгрывай новые игры! 🚀",
+                        text="🔔 **Напоминание!** Заходи сыграть в «Чекушку»! Проверь свой баланс и играй! 🚀",
                         parse_mode="Markdown"
                     )
-                    await asyncio.sleep(0.05)  # Пауза против спам-лимитов Telegram
+                    await asyncio.sleep(0.05)
                 except Exception:
                     pass
         except Exception as e:
-            logging.error(f"Ошибка при фоновой рассылке авто-пинга: {e}")
+            logging.error(f"Ошибка при авто-пинге: {e}")
 
-        await asyncio.sleep(300)  # Интервал 5 минут
+        await asyncio.sleep(300)
 
 # === КЛАВИАТУРЫ ===
 def main_keyboard():[cite: 3]
@@ -296,7 +373,7 @@ async def cmd_ref(message: Message):[cite: 3]
     )[cite: 3]
     await message.answer(text)[cite: 3]
 
-# === ФАЙЛ С ПОЛЬЗОВАТЕЛЯМИ (ВЫГРУЗКА) ===
+# === ФАЙЛ С ПОЛЬЗОВАТЕЛЯМИ (ВЫГРУЗКА И СИНХРОНИЗАЦИЯ ВРУЧНУЮ) ===
 @dp.message(Command("export"))[cite: 3]
 async def cmd_export(message: Message):[cite: 3]
     if message.from_user.id not in ADMIN_IDS:[cite: 3]
@@ -314,7 +391,14 @@ async def cmd_export(message: Message):[cite: 3]
         file_content += f"{u['user_id']} | {un} | {u['first_name']} | {u['balance']} | {u['ref_count']} | {u['referrer_id']}\n"[cite: 3]
 
     input_file = BufferedInputFile(file_content.encode("utf-8"), filename="users_data.txt")[cite: 3]
-    await message.answer_document(input_file, caption="📄 Полный список пользователей бота и их данных.")[cite: 3]
+    await message.answer_document(input_file, caption="📄 Полный список пользователей бота.")[cite: 3]
+
+@dp.message(Command("sync"))
+async def cmd_sync(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    await upload_db_to_github()
+    await message.answer("🔄 База данных вручную сохранена в GitHub!")
 
 # === АДМИН-КОМАНДЫ ДЛЯ УПРАВЛЕНИЯ БАЛАНСОМ ===
 @dp.message(F.from_user.id.in_(ADMIN_IDS) & F.text)[cite: 3]
@@ -380,7 +464,7 @@ async def process_admin_text_commands(message: Message):[cite: 3]
 
     await process_game_bet(message)[cite: 3]
 
-# === ВСЕ АДМИНСКИЕ КОМАНДЫ (НАБОР) ===
+# === ВСЕ АДМИНСКИЕ КОМАНДЫ ===
 @dp.message(Command("admin"))[cite: 3]
 async def cmd_admin(message: Message):[cite: 3]
     if message.from_user.id not in ADMIN_IDS:[cite: 3]
@@ -389,14 +473,14 @@ async def cmd_admin(message: Message):[cite: 3]
         "🛠 **Панель Администратора**\n\n"[cite: 3]
         "**Управление балансом:**\n"[cite: 3]
         "• `Чекушка 50 @username` — выдать 50 Чекушек\n"[cite: 3]
-        "• `Забрать 20 @username` — забрать 20 Чекушек\n"[cite: 3]
-        "• Также работает через **ответ на сообщение** (`Чекушка 50`)\n\n"[cite: 3]
+        "• `Забрать 20 @username` — забрать 20 Чекушек\n\n"[cite: 3]
         "**Команды админа:**\n"[cite: 3]
-        "• `/export` — Скачать файл со всеми пользователями и ID\n"[cite: 3]
-        "• `/stats` — Посмотреть общую статистику бота\n"[cite: 3]
-        "• `/ban [ID/@username]` — Заблокировать пользователя\n"[cite: 3]
-        "• `/unban [ID/@username]` — Разблокировать пользователя\n"[cite: 3]
-        "• `/broadcast [текст]` — Сделать рассылку пользователям"[cite: 3]
+        "• `/export` — Скачать файл с пользователями\n"[cite: 3]
+        "• `/sync` — Синхронизировать БД с GitHub вручную\n"[cite: 3]
+        "• `/stats` — Общая статистика\n"[cite: 3]
+        "• `/ban [ID/@username]` — Заблокировать\n"[cite: 3]
+        "• `/unban [ID/@username]` — Разблокировать\n"[cite: 3]
+        "• `/broadcast [текст]` — Рассылка"[cite: 3]
     )[cite: 3]
     await message.answer(text, parse_mode="Markdown")[cite: 3]
 
@@ -549,12 +633,15 @@ async def process_game_bet(message: Message):[cite: 3]
         )[cite: 3]
 
 # === ЗАПУСК ===
-async def main():[cite: 3]
+async def main():
+    await download_db_from_github()  # Загружаем последнюю версию БД с GitHub
     await init_db()[cite: 3]
-    # Запуск авто-пинга пользователей в отдельном async-таске
-    asyncio.create_task(auto_ping_task())
-    print("Бот запущен со всеми командами и авто-пингом каждые 5 минут!")
+    
+    asyncio.create_task(auto_ping_task())     # Авто-пинг каждые 5 минут
+    asyncio.create_task(github_sync_task())   # Авто-сохранение в GitHub каждые 10 минут
+    
+    print("Бот запущен с синхронизацией GitHub!")
     await dp.start_polling(bot)[cite: 3]
 
-if __name__ == "__main__":[cite: 3]
+if __name__ == "__main__":
     asyncio.run(main())[cite: 3]
