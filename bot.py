@@ -122,7 +122,7 @@ async def github_sync_task():
         except Exception:
             pass
 
-# === ИНИЦИАЛИЗА БД ===
+# === ИНИЦИАЛИЗА БД И РАБОТА С ПОЛЬЗОВАТЕЛЯМИ ===
 async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute(
@@ -131,7 +131,7 @@ async def init_db():
                 user_id INTEGER PRIMARY KEY,
                 first_name TEXT,
                 username TEXT,
-                balance INTEGER DEFAULT 0,
+                balance INTEGER DEFAULT 100,
                 referrer_id INTEGER,
                 ref_count INTEGER DEFAULT 0,
                 ref_balance INTEGER DEFAULT 0,
@@ -154,15 +154,16 @@ async def get_or_create_user(user_id: int, first_name: str, username: str = None
                     if not await c.fetchone():
                         valid_referrer = None
 
+            # При первом входе выдаётся 100 Чекушек
             await db.execute(
-                "INSERT INTO users (user_id, first_name, username, referrer_id) VALUES (?, ?, ?, ?)",
+                "INSERT INTO users (user_id, first_name, username, balance, referrer_id) VALUES (?, ?, ?, 100, ?)",
                 (user_id, first_name, username, valid_referrer),
             )
             await db.commit()
 
             if valid_referrer:
                 await db.execute(
-                    "UPDATE users SET balance = balance + 1, ref_count = ref_count + 1, ref_balance = ref_balance + 1 WHERE user_id = ?",
+                    "UPDATE users SET balance = balance + 10, ref_count = ref_count + 1, ref_balance = ref_balance + 10 WHERE user_id = ?",
                     (valid_referrer,),
                 )
                 await db.commit()
@@ -240,7 +241,7 @@ async def cmd_start(message: Message, command: CommandObject):
         await message.answer("❌ Вы заблокированы в боте.")
         return
 
-    await message.answer("Привет! 👋 Добро пожаловать в «Чекушку»!\nВыберите действие ниже 👇", reply_markup=main_reply_keyboard())
+    await message.answer("Привет! 👋 Добро пожаловать в «Чекушку»!\nВам начислено 100 💎 Чекушек на старт!\nВыберите действие ниже 👇", reply_markup=main_reply_keyboard())
 
 # === ОБРАБОТКА КОМАНД В ЧАТАХ И ГРУППАХ ===
 @dp.message(F.text.lower().in_(["чекушка", "профиль", "👤 профиль"]))
