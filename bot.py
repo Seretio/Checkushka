@@ -53,6 +53,19 @@ async def start_http_server():
     await site.start()
     logging.info(f"HTTP-сервер запущен на порту {PORT}")
 
+# === АВТОПИНГ СЕРВИСА ===
+async def self_ping_task():
+    url = "https://checkushka.onrender.com/"
+    await asyncio.sleep(10)  # Небольшая пауза перед первым пингом
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                async with session.get(url) as resp:
+                    logging.info(f"Автопинг выполнен ({url}): статус {resp.status}")
+            except Exception as e:
+                logging.error(f"Ошибка автопинга ({url}): {e}")
+            await asyncio.sleep(600)  # Пинг каждые 10 минут (600 сек)
+
 # === СИНХРОНИЗАЦИЯ С GITHUB ===
 async def download_db_from_github():
     if not GITHUB_TOKEN:
@@ -611,7 +624,10 @@ async def main():
     await init_db()
     await upload_db_to_github()
     await start_http_server()
+    
+    # Фоновые задачи
     asyncio.create_task(github_sync_task())
+    asyncio.create_task(self_ping_task())
 
     print("Бот запущен!")
     await dp.start_polling(bot, allowed_updates=["message", "callback_query", "pre_checkout_query"])
