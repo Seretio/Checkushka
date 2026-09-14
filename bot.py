@@ -3,6 +3,7 @@ import base64
 import logging
 import os
 import random
+import uuid
 import aiohttp
 import aiosqlite
 from aiohttp import web
@@ -122,7 +123,7 @@ async def github_sync_task():
         except Exception:
             pass
 
-# === ИНИЦИАЛИЗА БД И РАБОТА С ПОЛЬЗОВАТЕЛЯМИ ===
+# === ИНИЦИАЛИЗА БД И РАБОТА С ПОЛЬЗОВАТЕЛЯМИ И ЧЕКАМИ ===
 async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute(
@@ -136,6 +137,16 @@ async def init_db():
                 ref_count INTEGER DEFAULT 0,
                 ref_balance INTEGER DEFAULT 0,
                 is_banned INTEGER DEFAULT 0
+            )
+        """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS checks (
+                check_id TEXT PRIMARY KEY,
+                creator_id INTEGER,
+                amount INTEGER,
+                is_activated INTEGER DEFAULT 0
             )
         """
         )
@@ -154,7 +165,6 @@ async def get_or_create_user(user_id: int, first_name: str, username: str = None
                     if not await c.fetchone():
                         valid_referrer = None
 
-            # При первом входе выдаётся 100 Чекушек
             await db.execute(
                 "INSERT INTO users (user_id, first_name, username, balance, referrer_id) VALUES (?, ?, ?, 100, ?)",
                 (user_id, first_name, username, valid_referrer),
@@ -197,6 +207,29 @@ async def update_balance(user_id: int, amount: int):
         await db.commit()
     await upload_db_to_github()
 
+async def create_check_db(creator_id: int, amount: int) -> str:
+    check_id = str(uuid.uuid4())[:8]
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            "INSERT INTO checks (check_id, creator_id, amount) VALUES (?, ?, ?)",
+            (check_id, creator_id, amount)
+        )
+        await db.commit()
+    await upload_db_to_github()
+    return check_id
+
+async def get_check_db(check_id: str):
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM checks WHERE check_id = ?", (check_id,)) as cursor:
+            return await cursor.fetchone()
+
+async def activate_check_db(check_id: str):
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("UPDATE checks SET is_activated = 1 WHERE check_id = ?", (check_id,))
+        await db.commit()
+    await upload_db_to_github()
+
 # === КЛАВИАТУРЫ ===
 def main_reply_keyboard():
     return ReplyKeyboardMarkup(
@@ -226,10 +259,52 @@ def games_keyboard():
         ]
     )
 
-# === СТАРТ И ОСНОВНОЕ МЕНЮ ===
+# === СТАРТ И ОБРАБОТКА ЧЕКОВ ===
 @dp.message(CommandStart())
 async def cmd_start(message: Message, command: CommandObject):
-    referrer_id = int(command.args) if command.args and command.args.isdigit() else None
+    args = command.args.strip() if command.args else None
+    
+    # Обработка перехода по чеку
+    if args and args.startswith("check_"):
+        check_id = args.replace("check_", "")
+        check = await get_check_db(check_id)
+        
+        if not check:
+            await message.answer("❌ Чек не найден или недействителен.")
+            return
+
+        if check["is_activated"]:
+            await message.answer("⚠️ Этот чек уже был кем-то активирован.")
+            return
+
+        receiver = await get_or_create_user(
+            user_id=message.from_user.id,
+            first_name=message.from_user.first_name,
+            username=message.from_user.username
+        )
+
+        if receiver["is_banned"]:
+            await message.answer("❌ Вы заблокированы в боте.")
+            return
+
+        await activate_check_db(check_id)
+        await update_balance(receiver["user_id"], check["amount"])
+
+        await message.answer(f"🎉 Вы активировали чек на **{check['amount']}** 💎 Чекушек!", parse_mode="Markdown")
+
+        try:
+            creator = await get_user(check["creator_id"])
+            await bot.send_message(
+                chat_id=check["creator_id"],
+                text=f"🔔 Пользователь {receiver['first_name']} (@{receiver['username'] or 'без юзернейма'}) активировал ваш чек на **{check['amount']}** 💎 Чекушек!",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
+        return
+
+    # Обычный старт / реферальная ссылка
+    referrer_id = int(args) if args and args.isdigit() else None
     user = await get_or_create_user(
         user_id=message.from_user.id,
         first_name=message.from_user.first_name,
@@ -242,6 +317,84 @@ async def cmd_start(message: Message, command: CommandObject):
         return
 
     await message.answer("Привет! 👋 Добро пожаловать в «Чекушку»!\nВам начислено 100 💎 Чекушек на старт!\nВыберите действие ниже 👇", reply_markup=main_reply_keyboard())
+
+# === ОБРАБОТКА ПЕРЕВОДОВ И СОЗДАНИЯ ЧЕКОВ ===
+@dp.message(F.text.lower().startswith(("дать ", "перевести ", "перевод ")))
+async def process_transfer(message: Message):
+    parts = message.text.strip().split()
+    sender = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
+    
+    if sender["is_banned"]:
+        await message.answer("❌ Вы заблокированы.")
+        return
+
+    amount, target_str = 0, None
+
+    if message.reply_to_message and len(parts) >= 2 and parts[1].isdigit():
+        amount = int(parts[1])
+        target_str = str(message.reply_to_message.from_user.id)
+    elif len(parts) >= 3 and parts[1].isdigit():
+        amount = int(parts[1])
+        target_str = parts[2]
+
+    if amount <= 0 or not target_str:
+        await message.answer("❌ Использование: `дать [сумма] [@username или ID]` или ответом на сообщение: `дать [сумма]`", parse_mode="Markdown")
+        return
+
+    if sender["balance"] < amount:
+        await message.answer(f"❌ Недостаточно Чекушек! Ваш баланс: {sender['balance']} 💎")
+        return
+
+    target_user = await get_user_by_id_or_username(target_str)
+    if not target_user:
+        await message.answer("❌ Пользователь не найден в базе бота.")
+        return
+
+    if target_user["user_id"] == sender["user_id"]:
+        await message.answer("❌ Нельзя переводить Чекушки самому себе!")
+        return
+
+    await update_balance(sender["user_id"], -amount)
+    await update_balance(target_user["user_id"], amount)
+
+    await message.answer(
+        f"✅ Вы успешно перевели {amount} 💎 Чекушек пользователю {target_user['first_name']}!"
+    )
+
+@dp.message(F.text.lower().startswith(("чек ", "создать чек ")))
+async def process_create_check(message: Message):
+    parts = message.text.strip().split()
+    sender = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
+
+    if sender["is_banned"]:
+        await message.answer("❌ Вы заблокированы.")
+        return
+
+    amount = 0
+    for part in parts:
+        if part.isdigit():
+            amount = int(part)
+            break
+
+    if amount <= 0:
+        await message.answer("❌ Использование: `чек [сумма]` (например: `чек 50`)", parse_mode="Markdown")
+        return
+
+    if sender["balance"] < amount:
+        await message.answer(f"❌ Недостаточно Чекушек для создания чека! Ваш баланс: {sender['balance']} 💎")
+        return
+
+    await update_balance(sender["user_id"], -amount)
+    check_id = await create_check_db(sender["user_id"], amount)
+    
+    check_link = f"https://t.me/{BOT_USERNAME}?start=check_{check_id}"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎁 Забрать чек", url=check_link)]])
+
+    await message.answer(
+        f"💳 **Создан чек на {amount} 💎 Чекушек!**\n\nАктивировать чек может любой пользователь по кнопке ниже 👇",
+        parse_mode="Markdown",
+        reply_markup=kb
+    )
 
 # === ОБРАБОТКА КОМАНД В ЧАТАХ И ГРУППАХ ===
 @dp.message(F.text.lower().in_(["чекушка", "профиль", "👤 профиль"]))
