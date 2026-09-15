@@ -57,7 +57,7 @@ async def start_http_server():
 
 # === АВТОПИНГ СЕРВИСА ===
 async def self_ping_task():
-    url = "https://checkushka.onrender.com/"
+    url = "https://checkushka-yk10.onrender.com/"
     await asyncio.sleep(10)
     async with aiohttp.ClientSession() as session:
         while True:
