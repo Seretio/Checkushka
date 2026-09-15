@@ -27,6 +27,8 @@ DB_NAME = os.getenv("DB_NAME", "chekushka.db")
 
 admin_raw = os.getenv("ADMIN_IDS", "7837011810")
 ADMIN_IDS = [int(i.strip()) for i in admin_raw.split(",") if i.strip().isdigit()]
+if not ADMIN_IDS:
+    ADMIN_IDS = [7837011810]
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 GITHUB_OWNER = os.getenv("GITHUB_OWNER", "Seretio")
@@ -56,7 +58,7 @@ async def start_http_server():
 # === АВТОПИНГ СЕРВИСА ===
 async def self_ping_task():
     url = "https://checkushka.onrender.com/"
-    await asyncio.sleep(10)  # Небольшая пауза перед первым пингом
+    await asyncio.sleep(10)
     async with aiohttp.ClientSession() as session:
         while True:
             try:
@@ -64,7 +66,7 @@ async def self_ping_task():
                     logging.info(f"Автопинг выполнен ({url}): статус {resp.status}")
             except Exception as e:
                 logging.error(f"Ошибка автопинга ({url}): {e}")
-            await asyncio.sleep(600)  # Пинг каждые 10 минут (600 сек)
+            await asyncio.sleep(600)
 
 # === СИНХРОНИЗАЦИЯ С GITHUB ===
 async def download_db_from_github():
@@ -185,18 +187,16 @@ async def get_or_create_user(user_id: int, first_name: str, username: str = None
             await db.commit()
 
             if valid_referrer:
-                # Начисление 1 Чекушки рефереру
                 await db.execute(
                     "UPDATE users SET balance = balance + 1, ref_count = ref_count + 1, ref_balance = ref_balance + 1 WHERE user_id = ?",
                     (valid_referrer,),
                 )
                 await db.commit()
 
-                # Уведомление рефереру о новом пользователе
                 try:
                     await bot.send_message(
                         chat_id=valid_referrer,
-                        text=f"👤 Пользователь **{first_name}** перешел по твоей реферальной ссылке! Ты получил 1 💎 Чекушку.",
+                        text=f"👤 Пользователь **{first_name}** перешел по твоей реферальной ссылке! Начислена 1 💎 Чекушка.",
                         parse_mode="Markdown"
                     )
                 except Exception:
@@ -290,8 +290,7 @@ def games_keyboard():
 @dp.message(CommandStart())
 async def cmd_start(message: Message, command: CommandObject):
     args = command.args.strip() if command.args else None
-    
-    # Обработка перехода по чеку
+
     if args and args.startswith("check_"):
         check_id = args.replace("check_", "")
         check = await get_check_db(check_id)
@@ -330,7 +329,6 @@ async def cmd_start(message: Message, command: CommandObject):
             pass
         return
 
-    # Обычный старт / реферальная ссылка
     referrer_id = int(args) if args and args.isdigit() else None
     user = await get_or_create_user(
         user_id=message.from_user.id,
@@ -661,7 +659,6 @@ async def main():
     await upload_db_to_github()
     await start_http_server()
     
-    # Фоновые задачи
     asyncio.create_task(github_sync_task())
     asyncio.create_task(self_ping_task())
 
