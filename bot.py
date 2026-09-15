@@ -185,11 +185,22 @@ async def get_or_create_user(user_id: int, first_name: str, username: str = None
             await db.commit()
 
             if valid_referrer:
+                # Начисление 1 Чекушки рефереру
                 await db.execute(
-                    "UPDATE users SET balance = balance + 10, ref_count = ref_count + 1, ref_balance = ref_balance + 10 WHERE user_id = ?",
+                    "UPDATE users SET balance = balance + 1, ref_count = ref_count + 1, ref_balance = ref_balance + 1 WHERE user_id = ?",
                     (valid_referrer,),
                 )
                 await db.commit()
+
+                # Уведомление рефереру о новом пользователе
+                try:
+                    await bot.send_message(
+                        chat_id=valid_referrer,
+                        text=f"👤 Пользователь **{first_name}** перешел по твоей реферальной ссылке! Ты получил 1 💎 Чекушку.",
+                        parse_mode="Markdown"
+                    )
+                except Exception:
+                    pass
 
             async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cursor:
                 user = await cursor.fetchone()
@@ -246,7 +257,10 @@ async def activate_check_db(check_id: str):
 # === КЛАВИАТУРЫ ===
 def main_reply_keyboard():
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="👤 Профиль"), KeyboardButton(text="🎮 Играть")]],
+        keyboard=[
+            [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="🎮 Играть")],
+            [KeyboardButton(text="🔗 Рефералка")]
+        ],
         resize_keyboard=True
     )
 
@@ -330,6 +344,28 @@ async def cmd_start(message: Message, command: CommandObject):
         return
 
     await message.answer("Привет! 👋 Добро пожаловать в «Чекушку»!\nВам начислено 100 💎 Чекушек на старт!\nВыберите действие ниже 👇", reply_markup=main_reply_keyboard())
+
+# === РЕФЕРАЛЬНАЯ СИСТЕМА ===
+@dp.message(F.text.lower().in_(["рефералка", "🔗 рефералка", "рефералы"]))
+async def msg_referral(message: Message):
+    user = await get_user(message.from_user.id)
+    if not user:
+        user = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
+
+    if user['is_banned']:
+        await message.answer("❌ Вы заблокированы в боте.")
+        return
+
+    ref_link = f"https://t.me/{BOT_USERNAME}?start={user['user_id']}"
+    
+    text = (
+        "🔗 **Реферальная программа**\n\n"
+        f"Приглашайте друзей и получайте **1 💎 Чекушку** за каждого зашедшего пользователя!\n\n"
+        f"👥 Приглашено рефералов: **{user['ref_count']}**\n"
+        f"💰 Заработано с рефералов: **{user['ref_balance']}** 💎\n\n"
+        f"Ваша реферальная ссылка:\n`{ref_link}`"
+    )
+    await message.answer(text, parse_mode="Markdown")
 
 # === ОБРАБОТКА ПЕРЕВОДОВ И СОЗДАНИЯ ЧЕКОВ ===
 @dp.message(F.text.lower().startswith(("дать ", "перевести ", "перевод ")))
