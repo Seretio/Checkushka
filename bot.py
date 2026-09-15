@@ -114,7 +114,7 @@ async def upload_db_to_github():
                         sha = data.get("sha")
 
                 with open(DB_NAME, "rb") as f:
-                    content = base64.b64encode(f.read()).decode("utf-8")
+                    content = base64.b64decode(f.read()).decode("utf-8")
 
                 payload = {
                     "message": "Auto-save database",
@@ -173,7 +173,9 @@ async def get_or_create_user(user_id: int, first_name: str, username: str = None
         async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cursor:
             user = await cursor.fetchone()
 
+        is_new = False
         if not user:
+            is_new = True
             valid_referrer = referrer_id if referrer_id and referrer_id != user_id else None
             if valid_referrer:
                 async with db.execute("SELECT user_id FROM users WHERE user_id = ?", (valid_referrer,)) as c:
@@ -206,7 +208,7 @@ async def get_or_create_user(user_id: int, first_name: str, username: str = None
                 user = await cursor.fetchone()
             await upload_db_to_github()
 
-        return user
+        return user, is_new
 
 async def get_user_by_id_or_username(identifier: str):
     async with aiosqlite.connect(DB_NAME) as db:
@@ -303,7 +305,7 @@ async def cmd_start(message: Message, command: CommandObject):
             await message.answer("⚠️ Этот чек уже был кем-то активирован.")
             return
 
-        receiver = await get_or_create_user(
+        receiver, _ = await get_or_create_user(
             user_id=message.from_user.id,
             first_name=message.from_user.first_name,
             username=message.from_user.username
@@ -330,7 +332,7 @@ async def cmd_start(message: Message, command: CommandObject):
         return
 
     referrer_id = int(args) if args and args.isdigit() else None
-    user = await get_or_create_user(
+    user, is_new = await get_or_create_user(
         user_id=message.from_user.id,
         first_name=message.from_user.first_name,
         username=message.from_user.username,
@@ -341,14 +343,26 @@ async def cmd_start(message: Message, command: CommandObject):
         await message.answer("❌ Вы заблокированы в боте.")
         return
 
-    await message.answer("Привет! 👋 Добро пожаловать в «Чекушку»!\nВам начислено 100 💎 Чекушек на старт!\nВыберите действие ниже 👇", reply_markup=main_reply_keyboard())
+    if is_new:
+        start_text = (
+            "Привет! 👋 Добро пожаловать в «Чекушку»!\n"
+            "Вам начислено 100 💎 Чекушек на старт!\n"
+            "Выберите действие ниже 👇"
+        )
+    else:
+        start_text = (
+            "Привет! 👋 Добро пожаловать в «Чекушку»!\n"
+            "Выберите действие ниже 👇"
+        )
+
+    await message.answer(start_text, reply_markup=main_reply_keyboard())
 
 # === РЕФЕРАЛЬНАЯ СИСТЕМА ===
 @dp.message(F.text.lower().in_(["рефералка", "🔗 рефералка", "рефералы"]))
 async def msg_referral(message: Message):
     user = await get_user(message.from_user.id)
     if not user:
-        user = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
+        user, _ = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
 
     if user['is_banned']:
         await message.answer("❌ Вы заблокированы в боте.")
@@ -369,7 +383,7 @@ async def msg_referral(message: Message):
 @dp.message(F.text.lower().startswith(("дать ", "перевести ", "перевод ")))
 async def process_transfer(message: Message):
     parts = message.text.strip().split()
-    sender = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
+    sender, _ = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
     
     if sender["is_banned"]:
         await message.answer("❌ Вы заблокированы.")
@@ -411,7 +425,7 @@ async def process_transfer(message: Message):
 @dp.message(F.text.lower().startswith(("чек ", "создать чек ")))
 async def process_create_check(message: Message):
     parts = message.text.strip().split()
-    sender = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
+    sender, _ = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
 
     if sender["is_banned"]:
         await message.answer("❌ Вы заблокированы.")
@@ -448,7 +462,7 @@ async def process_create_check(message: Message):
 async def msg_profile(message: Message):
     user = await get_user(message.from_user.id)
     if not user:
-        user = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
+        user, _ = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
 
     if user['is_banned']:
         await message.answer("❌ Вы заблокированы в боте.")
@@ -599,7 +613,7 @@ async def process_game_bet(message: Message):
         await message.answer("Ставка должна быть больше 0!")
         return
 
-    user = await get_or_create_user(
+    user, _ = await get_or_create_user(
         user_id=message.from_user.id,
         first_name=message.from_user.first_name,
         username=message.from_user.username
