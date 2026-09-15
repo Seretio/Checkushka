@@ -114,18 +114,24 @@ async def upload_db_to_github():
                         sha = data.get("sha")
 
                 with open(DB_NAME, "rb") as f:
-                    content = base64.b64decode(f.read()).decode("utf-8")
+                    content_bytes = f.read()
+                    content_b64 = base64.b64encode(content_bytes).decode("utf-8")
 
                 payload = {
                     "message": "Auto-save database",
-                    "content": content,
+                    "content": content_b64,
                     "branch": GITHUB_BRANCH,
                 }
                 if sha:
                     payload["sha"] = sha
 
                 async with session.put(url, headers=headers, json=payload) as resp:
-                    return resp.status in (200, 201)
+                    if resp.status in (200, 201):
+                        logging.info("База данных успешно сохранена в GitHub!")
+                        return True
+                    else:
+                        logging.error(f"Ошибка выгрузки в GitHub: статус {resp.status}")
+                        return False
         except Exception as e:
             logging.exception(f"Ошибка GitHub-сохранения: {e}")
             return False
