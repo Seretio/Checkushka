@@ -136,11 +136,22 @@ async def upload_db_to_github():
             logging.exception(f"Ошибка GitHub-сохранения: {e}")
             return False
 
+async def checkpoint_and_upload_db():
+    if not GITHUB_TOKEN:
+        return False
+    try:
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute("PRAGMA wal_checkpoint(FULL);")
+    except Exception as e:
+        logging.error(f"Ошибка при выполнении wal_checkpoint: {e}")
+
+    return await upload_db_to_github()
+
 async def github_sync_task():
     while True:
         await asyncio.sleep(600)
         try:
-            await upload_db_to_github()
+            await checkpoint_and_upload_db()
         except Exception:
             pass
 
@@ -212,9 +223,11 @@ async def get_or_create_user(user_id: int, first_name: str, username: str = None
 
             async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cursor:
                 user = await cursor.fetchone()
-            await upload_db_to_github()
 
-        return user, is_new
+    if is_new:
+        await checkpoint_and_upload_db()
+
+    return user, is_new
 
 async def get_user_by_id_or_username(identifier: str):
     async with aiosqlite.connect(DB_NAME) as db:
@@ -237,7 +250,7 @@ async def update_balance(user_id: int, amount: int):
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
         await db.commit()
-    await upload_db_to_github()
+    await checkpoint_and_upload_db()
 
 async def create_check_db(creator_id: int, amount: int) -> str:
     check_id = str(uuid.uuid4())[:8]
@@ -247,7 +260,7 @@ async def create_check_db(creator_id: int, amount: int) -> str:
             (check_id, creator_id, amount)
         )
         await db.commit()
-    await upload_db_to_github()
+    await checkpoint_and_upload_db()
     return check_id
 
 async def get_check_db(check_id: str):
@@ -260,7 +273,7 @@ async def activate_check_db(check_id: str):
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("UPDATE checks SET is_activated = 1 WHERE check_id = ?", (check_id,))
         await db.commit()
-    await upload_db_to_github()
+    await checkpoint_and_upload_db()
 
 # === КЛАВИАТУРЫ ===
 def main_reply_keyboard():
@@ -676,7 +689,7 @@ async def process_game_bet(message: Message):
 async def main():
     await download_db_from_github()
     await init_db()
-    await upload_db_to_github()
+    await checkpoint_and_upload_db()
     await start_http_server()
     
     asyncio.create_task(github_sync_task())
