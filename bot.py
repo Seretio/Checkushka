@@ -186,9 +186,8 @@ def deposit_keyboard():
 def games_keyboard():
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="⚽ Футбол", callback_data="game_football")],
-            [InlineKeyboardButton(text="🏀 Баскетбол", callback_data="game_basketball")],
-            [InlineKeyboardButton(text="🎯 Дартс", callback_data="game_darts")],
+            [InlineKeyboardButton(text="⚽ Футбол", callback_data="game_football"), InlineKeyboardButton(text="🏀 Баскетбол", callback_data="game_basketball")],
+            [InlineKeyboardButton(text="🎯 Дартс", callback_data="game_darts"), InlineKeyboardButton(text="🎳 Боулинг", callback_data="game_bowling")]
         ]
     )
 
@@ -392,7 +391,8 @@ async def msg_games(message: Message):
         "Чтобы сделать ставку, отправьте команду с игрой и суммой ставки:\n"
         "• `баскетбол 5`\n"
         "• `футбол 1`\n"
-        "• `дартс 500`"
+        "• `дартс 500`\n"
+        "• `боулинг 10`"
     )
     await message.answer(text, parse_mode="Markdown", reply_markup=games_keyboard())
 
@@ -494,7 +494,7 @@ async def process_admin_text_commands(message: Message):
 @dp.callback_query(F.data.startswith("game_"))
 async def cb_game_info(call: CallbackQuery):
     game_type = call.data.split("_")[1]
-    names = {"football": "футбол", "basketball": "баскетбол", "darts": "дартс"}
+    names = {"football": "футбол", "basketball": "баскетбол", "darts": "дартс", "bowling": "боулинг"}
     await call.message.answer(f"Чтобы сыграть, напишите в чат: `{names.get(game_type, 'игру')} [ставка]`\nНапример: `{names.get(game_type, 'игру')} 10`", parse_mode="Markdown")
     await call.answer()
 
@@ -507,7 +507,12 @@ async def process_game_bet(message: Message):
         return
 
     game_name, bet_str = parts[0].lower(), parts[1]
-    game_map = {"футбол": ("⚽", "football"), "баскетбол": ("🏀", "basketball"), "дартс": ("🎯", "darts")}
+    game_map = {
+        "футбол": ("⚽", "football"), 
+        "баскетбол": ("🏀", "basketball"), 
+        "дартс": ("🎯", "darts"),
+        "боулинг": ("🎳", "bowling")
+    }
 
     if game_name not in game_map or not bet_str.isdigit():
         return
@@ -539,7 +544,24 @@ async def process_game_bet(message: Message):
     await asyncio.sleep(2.5)
 
     is_win = False
-    if game_code == "football" and val in [3, 4, 5]:
+    coeff = 0.0
+
+    # Расчет результатов игр
+    if game_code == "bowling":
+        if val == 6:  # СТРАЙК (Все кегли сбиты!)
+            is_win = True
+            if bet < 10:
+                coeff = random.uniform(2.5, 3.5)
+            elif bet < 100:
+                coeff = random.uniform(2.0, 2.5)
+            else:
+                coeff = random.uniform(1.6, 2.0)
+        elif val in [2, 3, 4, 5]:  # Частичный сбив
+            is_win = True
+            coeff = random.uniform(1.1, 1.3)
+        else:  # val == 1 (Промах)
+            is_win = False
+    elif game_code == "football" and val in [3, 4, 5]:
         is_win = True
     elif game_code == "basketball" and val in [4, 5]:
         is_win = True
@@ -547,20 +569,27 @@ async def process_game_bet(message: Message):
         is_win = True
 
     if is_win:
-        if bet < 10:
-            coeff = random.uniform(1.8, 2.5)
-        elif bet < 100:
-            coeff = random.uniform(1.4, 1.8)
-        else:
-            coeff = random.uniform(1.2, 1.5)
+        if game_code != "bowling":
+            if bet < 10:
+                coeff = random.uniform(1.8, 2.5)
+            elif bet < 100:
+                coeff = random.uniform(1.4, 1.8)
+            else:
+                coeff = random.uniform(1.2, 1.5)
 
         total_payout = int(bet * coeff)
         await update_balance(message.from_user.id, total_payout)
         new_user = await get_user(message.from_user.id)
         
         profit = total_payout - bet
+        
+        if game_code == "bowling" and val == 6:
+            strike_text = "🎳 **СТРАЙК! Вы выбили все кегли!** 🎉\n"
+        else:
+            strike_text = "🎉 **ПОБЕДА!**\n"
+
         await message.answer(
-            f"🎉 **ПОБЕДА!**\nВыигрыш: +{total_payout} 💎 Чекушек (Прибыль: +{profit} 💎)!\nВаш баланс: {new_user['balance']} 💎",
+            f"{strike_text}Выигрыш: +{total_payout} 💎 Чекушек (Прибыль: +{profit} 💎)!\nВаш баланс: {new_user['balance']} 💎",
             parse_mode="Markdown"
         )
     else:
