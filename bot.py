@@ -536,6 +536,7 @@ async def process_game_bet(message: Message):
         await message.answer(f"❌ Недостаточно Чекушек! Ваш баланс: {user['balance']} 💎")
         return
 
+    # Списываем ставку перед броском
     await update_balance(message.from_user.id, -bet)
     
     emoji, game_code = game_map[game_name]
@@ -543,25 +544,81 @@ async def process_game_bet(message: Message):
     val = dice_msg.dice.value
     await asyncio.sleep(2.5)
 
-    is_win = False
-    coeff = 0.0
-
-    # Расчет результатов игр
+    # === ЛОГИКА ДЛЯ БОУЛИНГА ===
     if game_code == "bowling":
-        if val == 6:  # СТРАЙК (Все кегли сбиты!)
-            is_win = True
+        if val == 6:  # Сбиты все кегли (Страйк)
             if bet < 10:
                 coeff = random.uniform(2.5, 3.5)
             elif bet < 100:
                 coeff = random.uniform(2.0, 2.5)
             else:
                 coeff = random.uniform(1.6, 2.0)
-        elif val in [2, 3, 4, 5]:  # Частичный сбив
-            is_win = True
-            coeff = random.uniform(1.1, 1.3)
-        else:  # val == 1 (Промах)
-            is_win = False
-    elif game_code == "football" and val in [3, 4, 5]:
+            
+            total_payout = int(bet * coeff)
+            await update_balance(message.from_user.id, total_payout)
+            new_user = await get_user(message.from_user.id)
+            profit = total_payout - bet
+            
+            await message.answer(
+                f"🎉 **СТРАЙК! Сбиты абсолютно все кегли!**\n"
+                f"Выигрыш: +{total_payout} 💎 Чекушек (Прибыль: +{profit} 💎)!\n"
+                f"Ваш баланс: {new_user['balance']} 💎",
+                parse_mode="Markdown"
+            )
+
+        elif val == 5:  # Сбиты все кроме 1
+            if bet < 10:
+                coeff = random.uniform(1.8, 2.2)
+            elif bet < 100:
+                coeff = random.uniform(1.5, 1.8)
+            else:
+                coeff = random.uniform(1.3, 1.5)
+
+            total_payout = int(bet * coeff)
+            await update_balance(message.from_user.id, total_payout)
+            new_user = await get_user(message.from_user.id)
+            profit = total_payout - bet
+
+            await message.answer(
+                f"🔥 **ПОЧТИ СТРАЙК! Сбиты все кегли, кроме одной!**\n"
+                f"Выигрыш: +{total_payout} 💎 Чекушек (Прибыль: +{profit} 💎)!\n"
+                f"Ваш баланс: {new_user['balance']} 💎",
+                parse_mode="Markdown"
+            )
+
+        elif val == 4:  # Сбиты все кроме 2
+            if bet < 10:
+                coeff = random.uniform(1.4, 1.6)
+            elif bet < 100:
+                coeff = random.uniform(1.2, 1.4)
+            else:
+                coeff = random.uniform(1.1, 1.25)
+
+            total_payout = int(bet * coeff)
+            await update_balance(message.from_user.id, total_payout)
+            new_user = await get_user(message.from_user.id)
+            profit = total_payout - bet
+
+            await message.answer(
+                f"👍 **ХОРОШИЙ БРОСОК! Сбиты почти все кегли (осталось 2)!**\n"
+                f"Выигрыш: +{total_payout} 💎 Чекушек (Прибыль: +{profit} 💎)!\n"
+                f"Ваш баланс: {new_user['balance']} 💎",
+                parse_mode="Markdown"
+            )
+
+        else:  # 1, 2 или 3 кегли — Выигрыш 0
+            new_user = await get_user(message.from_user.id)
+            await message.answer(
+                f"🎳 **Сбито всего {val} кегли(ей)!**\n"
+                f"Выигрыш: **0 💎 Чекушек**.\n"
+                f"Ваш баланс: {new_user['balance']} 💎",
+                parse_mode="Markdown"
+            )
+        return
+
+    # === ЛОГИКА ДЛЯ ОСТАЛЬНЫХ ИГР (Футбол, Баскетбол, Дартс) ===
+    is_win = False
+    if game_code == "football" and val in [3, 4, 5]:
         is_win = True
     elif game_code == "basketball" and val in [4, 5]:
         is_win = True
@@ -569,27 +626,20 @@ async def process_game_bet(message: Message):
         is_win = True
 
     if is_win:
-        if game_code != "bowling":
-            if bet < 10:
-                coeff = random.uniform(1.8, 2.5)
-            elif bet < 100:
-                coeff = random.uniform(1.4, 1.8)
-            else:
-                coeff = random.uniform(1.2, 1.5)
+        if bet < 10:
+            coeff = random.uniform(1.8, 2.5)
+        elif bet < 100:
+            coeff = random.uniform(1.4, 1.8)
+        else:
+            coeff = random.uniform(1.2, 1.5)
 
         total_payout = int(bet * coeff)
         await update_balance(message.from_user.id, total_payout)
         new_user = await get_user(message.from_user.id)
         
         profit = total_payout - bet
-        
-        if game_code == "bowling" and val == 6:
-            strike_text = "🎳 **СТРАЙК! Вы выбили все кегли!** 🎉\n"
-        else:
-            strike_text = "🎉 **ПОБЕДА!**\n"
-
         await message.answer(
-            f"{strike_text}Выигрыш: +{total_payout} 💎 Чекушек (Прибыль: +{profit} 💎)!\nВаш баланс: {new_user['balance']} 💎",
+            f"🎉 **ПОБЕДА!**\nВыигрыш: +{total_payout} 💎 Чекушек (Прибыль: +{profit} 💎)!\nВаш баланс: {new_user['balance']} 💎",
             parse_mode="Markdown"
         )
     else:
