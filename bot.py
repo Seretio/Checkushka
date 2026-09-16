@@ -7,7 +7,7 @@ import aiohttp
 import asyncpg
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandObject, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -77,6 +77,7 @@ async def init_db():
                 first_name TEXT,
                 username TEXT,
                 balance INT DEFAULT 100,
+                bottles INT DEFAULT 0,
                 referrer_id BIGINT,
                 ref_count INT DEFAULT 0,
                 ref_balance INT DEFAULT 0,
@@ -88,6 +89,10 @@ async def init_db():
                 amount INT,
                 is_activated INT DEFAULT 0
             );
+        """)
+        # Безопасное добавление колонки bottles для существующих таблиц
+        await conn.execute("""
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS bottles INT DEFAULT 0;
         """)
     logging.info("База данных PostgreSQL успешно инициализирована.")
 
@@ -105,7 +110,7 @@ async def get_or_create_user(user_id: int, first_name: str, username: str = None
                     valid_referrer = None
 
             await conn.execute(
-                "INSERT INTO users (user_id, first_name, username, balance, referrer_id) VALUES ($1, $2, $3, 100, $4)",
+                "INSERT INTO users (user_id, first_name, username, balance, bottles, referrer_id) VALUES ($1, $2, $3, 100, 0, $4)",
                 user_id, first_name, username, valid_referrer
             )
 
@@ -143,6 +148,10 @@ async def update_balance(user_id: int, amount: int):
     async with db_pool.acquire() as conn:
         await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", amount, user_id)
 
+async def update_bottles(user_id: int, amount: int):
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE users SET bottles = bottles + $1 WHERE user_id = $2", amount, user_id)
+
 async def create_check_db(creator_id: int, amount: int) -> str:
     check_id = str(uuid.uuid4())[:8]
     async with db_pool.acquire() as conn:
@@ -165,13 +174,20 @@ def main_reply_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="🎮 Играть")],
-            [KeyboardButton(text="🔗 Рефералка")]
+            [KeyboardButton(text="🛒 Магазин"), KeyboardButton(text="🔗 Рефералка")]
         ],
         resize_keyboard=True
     )
 
 def profile_inline_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💎 Пополнить", callback_data="deposit")]])
+
+def shop_inline_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🍾 Купить бутылку", callback_data="buy_bottle")]
+        ]
+    )
 
 def deposit_keyboard():
     return InlineKeyboardMarkup(
@@ -259,6 +275,45 @@ async def cmd_start(message: Message, command: CommandObject):
         )
 
     await message.answer(start_text, reply_markup=main_reply_keyboard())
+
+# === МАГАЗИН ===
+@dp.message(Command("shop", "магазин"))
+@dp.message(F.text.lower().in_(["магазин", "🛒 магазин"]))
+async def msg_shop(message: Message):
+    user = await get_user(message.from_user.id)
+    if not user:
+        user, _ = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
+
+    if user['is_banned']:
+        await message.answer("❌ Вы заблокированы в боте.")
+        return
+
+    text = (
+        "🛒 **МАГАЗИН**\n\n"
+        "🍾 **Бутылка** — 5 Чекушек\n"
+        "Одноразовый предмет."
+    )
+    await message.answer(text, parse_mode="Markdown", reply_markup=shop_inline_keyboard())
+
+@dp.callback_query(F.data == "buy_bottle")
+async def cb_buy_bottle(call: CallbackQuery):
+    user = await get_user(call.from_user.id)
+    if not user:
+        user, _ = await get_or_create_user(call.from_user.id, call.from_user.first_name, call.from_user.username)
+
+    if user['is_banned']:
+        await call.answer("❌ Вы заблокированы.", show_alert=True)
+        return
+
+    if user["balance"] < 5:
+        await call.answer("❌ Недостаточно Чекушек! Бутылка стоит 5 Чекушек.", show_alert=True)
+        return
+
+    await update_balance(call.from_user.id, -5)
+    await update_bottles(call.from_user.id, 1)
+
+    await call.message.answer("✅ Ты купил 🍾 бутылку за 5 Чекушек!")
+    await call.answer()
 
 # === РЕФЕРАЛЬНАЯ СИСТЕМА ===
 @dp.message(F.text.lower().in_(["рефералка", "🔗 рефералка", "рефералы"]))
@@ -363,6 +418,34 @@ async def process_create_check(message: Message):
 # === ОБРАБОТКА КОМАНД В ЧАТАХ И ГРУППАХ ===
 @dp.message(F.text.lower().in_(["чекушка", "профиль", "👤 профиль"]))
 async def msg_profile(message: Message):
+    # Если это ответ на сообщение в группе с текстом "чекушка", обрабатываем удар бутылкой
+    if message.reply_to_message and message.text.lower().strip() == "чекушка":
+        attacker, _ = await get_or_create_user(
+            user_id=message.from_user.id,
+            first_name=message.from_user.first_name,
+            username=message.from_user.username
+        )
+
+        if attacker['is_banned']:
+            await message.answer("❌ Вы заблокированы в боте.")
+            return
+
+        if attacker.get("bottles", 0) <= 0:
+            await message.answer("❌ У вас нет 🍾 бутылки! Купите ее в магазине `/shop` за 5 Чекушек.")
+            return
+
+        victim_user = message.reply_to_message.from_user
+        if victim_user.id == attacker["user_id"]:
+            await message.answer("❌ Нельзя ударить самого себя!")
+            return
+
+        # Списываем 1 бутылку
+        await update_bottles(attacker["user_id"], -1)
+
+        await message.answer(f"🍾 {attacker['first_name']} ударил {victim_user.first_name} бутылкой!")
+        return
+
+    # Если обычный вызов профиля
     user = await get_user(message.from_user.id)
     if not user:
         user, _ = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
@@ -371,11 +454,13 @@ async def msg_profile(message: Message):
         await message.answer("❌ Вы заблокированы в боте.")
         return
 
+    bottles_cnt = user.get("bottles", 0)
     text = (
         "👤 **Ваш профиль**\n"
         f"├ 👤 {user['first_name']}\n"
         f"├ 🆔 ID: `{user['user_id']}`\n"
-        f"└ 💎 Чекушок: {user['balance']}"
+        f"├ 💎 Чекушок: {user['balance']}\n"
+        f"└ 🍾 Бутылок: {bottles_cnt}"
     )
     await message.answer(text, parse_mode="Markdown", reply_markup=profile_inline_keyboard())
 
