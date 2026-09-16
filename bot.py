@@ -1,11 +1,10 @@
 import asyncio
-import base64
 import logging
 import os
 import random
 import uuid
 import aiohttp
-import aiosqlite
+import asyncpg
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandObject, CommandStart
@@ -23,24 +22,19 @@ from aiogram.types import (
 # === НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ===
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8950292427:AAHiJ26IAGA4cTwC4OAnJU3DxZUVE8Ld7xg")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "Checkushhka_Bot")
-DB_NAME = os.getenv("DB_NAME", "chekushka.db")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 admin_raw = os.getenv("ADMIN_IDS", "7837011810")
 ADMIN_IDS = [int(i.strip()) for i in admin_raw.split(",") if i.strip().isdigit()]
 if not ADMIN_IDS:
     ADMIN_IDS = [7837011810]
 
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
-GITHUB_OWNER = os.getenv("GITHUB_OWNER", "Seretio")
-GITHUB_REPO = os.getenv("GITHUB_REPO", "Checkushka")
-GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
-
-github_sync_lock = asyncio.Lock()
 PORT = int(os.getenv("PORT", 8080))
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+db_pool = None
 
 # === МИНИМАЛЬНЫЙ HTTP-СЕРВЕР ===
 async def handle_ping(request):
@@ -68,150 +62,58 @@ async def self_ping_task():
                 logging.error(f"Ошибка автопинга ({url}): {e}")
             await asyncio.sleep(600)
 
-# === СИНХРОНИЗАЦИЯ С GITHUB ===
-async def download_db_from_github():
-    if not GITHUB_TOKEN:
-        logging.warning("GITHUB_TOKEN не задан, синхронизация отключена.")
-        return
-
-    url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{DB_NAME}?ref={GITHUB_BRANCH}"
-    headers = {
-        "Authorization": f"token {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github.v3+json",
-    }
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                content = base64.b64decode(data["content"])
-                with open(DB_NAME, "wb") as f:
-                    f.write(content)
-                logging.info("База данных успешно загружена из GitHub!")
-            else:
-                logging.info("Файл БД не найден на GitHub, создаём локально.")
-
-async def upload_db_to_github():
-    if not GITHUB_TOKEN:
-        return False
-
-    if not os.path.exists(DB_NAME):
-        return False
-
-    async with github_sync_lock:
-        url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{DB_NAME}"
-        headers = {
-            "Authorization": f"Bearer {GITHUB_TOKEN}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                sha = None
-                async with session.get(f"{url}?ref={GITHUB_BRANCH}", headers=headers) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        sha = data.get("sha")
-
-                with open(DB_NAME, "rb") as f:
-                    content_bytes = f.read()
-                    content_b64 = base64.b64encode(content_bytes).decode("utf-8")
-
-                payload = {
-                    "message": "Auto-save database",
-                    "content": content_b64,
-                    "branch": GITHUB_BRANCH,
-                }
-                if sha:
-                    payload["sha"] = sha
-
-                async with session.put(url, headers=headers, json=payload) as resp:
-                    if resp.status in (200, 201):
-                        logging.info("База данных успешно сохранена в GitHub!")
-                        return True
-                    else:
-                        logging.error(f"Ошибка выгрузки в GitHub: статус {resp.status}")
-                        return False
-        except Exception as e:
-            logging.exception(f"Ошибка GitHub-сохранения: {e}")
-            return False
-
-async def checkpoint_and_upload_db():
-    if not GITHUB_TOKEN:
-        return False
-    try:
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("PRAGMA wal_checkpoint(FULL);")
-    except Exception as e:
-        logging.error(f"Ошибка при выполнении wal_checkpoint: {e}")
-
-    return await upload_db_to_github()
-
-async def github_sync_task():
-    while True:
-        await asyncio.sleep(600)
-        try:
-            await checkpoint_and_upload_db()
-        except Exception:
-            pass
-
-# === ИНИЦИАЛИЗА БД И РАБОТА С ПОЛЬЗОВАТЕЛЯМИ И ЧЕКАМИ ===
+# === ИНИЦИАЛИЗА БД И РАБОТА С ПОЛЬЗОВАТЕЛЯМИ И ЧЕКАМИ (POSTGRESQL) ===
 async def init_db():
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute(
-            """
+    global db_pool
+    url = DATABASE_URL
+    if url and url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+
+    db_pool = await asyncpg.create_pool(dsn=url)
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
+                user_id BIGINT PRIMARY KEY,
                 first_name TEXT,
                 username TEXT,
-                balance INTEGER DEFAULT 100,
-                referrer_id INTEGER,
-                ref_count INTEGER DEFAULT 0,
-                ref_balance INTEGER DEFAULT 0,
-                is_banned INTEGER DEFAULT 0
-            )
-        """
-        )
-        await db.execute(
-            """
+                balance INT DEFAULT 100,
+                referrer_id BIGINT,
+                ref_count INT DEFAULT 0,
+                ref_balance INT DEFAULT 0,
+                is_banned INT DEFAULT 0
+            );
             CREATE TABLE IF NOT EXISTS checks (
                 check_id TEXT PRIMARY KEY,
-                creator_id INTEGER,
-                amount INTEGER,
-                is_activated INTEGER DEFAULT 0
-            )
-        """
-        )
-        await db.commit()
+                creator_id BIGINT,
+                amount INT,
+                is_activated INT DEFAULT 0
+            );
+        """)
+    logging.info("База данных PostgreSQL успешно инициализирована.")
 
 async def get_or_create_user(user_id: int, first_name: str, username: str = None, referrer_id: int = None):
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            user = await cursor.fetchone()
-
+    async with db_pool.acquire() as conn:
+        user = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
         is_new = False
+
         if not user:
             is_new = True
             valid_referrer = referrer_id if referrer_id and referrer_id != user_id else None
             if valid_referrer:
-                async with db.execute("SELECT user_id FROM users WHERE user_id = ?", (valid_referrer,)) as c:
-                    if not await c.fetchone():
-                        valid_referrer = None
+                ref_exists = await conn.fetchval("SELECT user_id FROM users WHERE user_id = $1", valid_referrer)
+                if not ref_exists:
+                    valid_referrer = None
 
-            await db.execute(
-                "INSERT INTO users (user_id, first_name, username, balance, referrer_id) VALUES (?, ?, ?, 100, ?)",
-                (user_id, first_name, username, valid_referrer),
+            await conn.execute(
+                "INSERT INTO users (user_id, first_name, username, balance, referrer_id) VALUES ($1, $2, $3, 100, $4)",
+                user_id, first_name, username, valid_referrer
             )
-            await db.commit()
 
             if valid_referrer:
-                await db.execute(
-                    "UPDATE users SET balance = balance + 1, ref_count = ref_count + 1, ref_balance = ref_balance + 1 WHERE user_id = ?",
-                    (valid_referrer,),
+                await conn.execute(
+                    "UPDATE users SET balance = balance + 1, ref_count = ref_count + 1, ref_balance = ref_balance + 1 WHERE user_id = $1",
+                    valid_referrer
                 )
-                await db.commit()
-
                 try:
                     await bot.send_message(
                         chat_id=valid_referrer,
@@ -221,59 +123,42 @@ async def get_or_create_user(user_id: int, first_name: str, username: str = None
                 except Exception:
                     pass
 
-            async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cursor:
-                user = await cursor.fetchone()
-
-    if is_new:
-        await checkpoint_and_upload_db()
+            user = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
 
     return user, is_new
 
 async def get_user_by_id_or_username(identifier: str):
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
+    async with db_pool.acquire() as conn:
         identifier = identifier.replace("@", "").strip()
         if identifier.isdigit():
-            async with db.execute("SELECT * FROM users WHERE user_id = ?", (int(identifier),)) as cursor:
-                return await cursor.fetchone()
+            return await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", int(identifier))
         else:
-            async with db.execute("SELECT * FROM users WHERE LOWER(username) = LOWER(?)", (identifier,)) as cursor:
-                return await cursor.fetchone()
+            return await conn.fetchrow("SELECT * FROM users WHERE LOWER(username) = LOWER($1)", identifier)
 
 async def get_user(user_id: int):
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            return await cursor.fetchone()
+    async with db_pool.acquire() as conn:
+        return await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
 
 async def update_balance(user_id: int, amount: int):
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
-        await db.commit()
-    await checkpoint_and_upload_db()
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", amount, user_id)
 
 async def create_check_db(creator_id: int, amount: int) -> str:
     check_id = str(uuid.uuid4())[:8]
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute(
-            "INSERT INTO checks (check_id, creator_id, amount) VALUES (?, ?, ?)",
-            (check_id, creator_id, amount)
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO checks (check_id, creator_id, amount) VALUES ($1, $2, $3)",
+            check_id, creator_id, amount
         )
-        await db.commit()
-    await checkpoint_and_upload_db()
     return check_id
 
 async def get_check_db(check_id: str):
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM checks WHERE check_id = ?", (check_id,)) as cursor:
-            return await cursor.fetchone()
+    async with db_pool.acquire() as conn:
+        return await conn.fetchrow("SELECT * FROM checks WHERE check_id = $1", check_id)
 
 async def activate_check_db(check_id: str):
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE checks SET is_activated = 1 WHERE check_id = ?", (check_id,))
-        await db.commit()
-    await checkpoint_and_upload_db()
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE checks SET is_activated = 1 WHERE check_id = $1", check_id)
 
 # === КЛАВИАТУРЫ ===
 def main_reply_keyboard():
@@ -687,15 +572,11 @@ async def process_game_bet(message: Message):
 
 # === ЗАПУСК ===
 async def main():
-    await download_db_from_github()
     await init_db()
-    await checkpoint_and_upload_db()
     await start_http_server()
-    
-    asyncio.create_task(github_sync_task())
     asyncio.create_task(self_ping_task())
 
-    print("Бот запущен!")
+    print("Бот запущен на PostgreSQL!")
     await dp.start_polling(bot, allowed_updates=["message", "callback_query", "pre_checkout_query"])
 
 if __name__ == "__main__":
