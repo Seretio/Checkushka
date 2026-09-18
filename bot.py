@@ -793,11 +793,21 @@ async def process_game_bet(message: Message):
         await message.answer(f"❌ Недостаточно Чекушек! Ваш баланс: {user['balance']} 💎")
         return
 
+    # Списываем баланс перед броском
     await update_balance(message.from_user.id, -bet)
     
     emoji, game_code = game_map[game_name]
-    dice_msg = await message.answer_dice(emoji=emoji)
-    val = dice_msg.dice.value
+    
+    try:
+        dice_msg = await message.answer_dice(emoji=emoji)
+        val = dice_msg.dice.value
+    except Exception as e:
+        # Автоматический возврат ставки при ошибке отправки кубика
+        await update_balance(message.from_user.id, bet)
+        logging.error(f"Ошибка отправки dice: {e}")
+        await message.answer("❌ Ошибка отправки анимации. Убедитесь, что у бота есть права отправлять стикеры/эмодзи. Ставка возвращена!")
+        return
+
     await asyncio.sleep(2.5)
 
     if game_code == "bowling":
