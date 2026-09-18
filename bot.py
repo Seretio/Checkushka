@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import logging
 import os
 import random
@@ -82,8 +82,7 @@ async def init_db():
                 referrer_id BIGINT,
                 ref_count INT DEFAULT 0,
                 ref_balance INT DEFAULT 0,
-                is_banned INT DEFAULT 0,
-                last_bonus_claim TIMESTAMP WITH TIME ZONE
+                is_banned INT DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS checks (
                 check_id TEXT PRIMARY KEY,
@@ -91,21 +90,9 @@ async def init_db():
                 amount INT,
                 is_activated INT DEFAULT 0
             );
-            CREATE TABLE IF NOT EXISTS promo_codes (
-                code TEXT PRIMARY KEY,
-                reward INT NOT NULL,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS promo_activations (
-                code TEXT REFERENCES promo_codes(code) ON DELETE CASCADE,
-                user_id BIGINT REFERENCES users(user_id) ON DELETE CASCADE,
-                activated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (code, user_id)
-            );
         """)
         await conn.execute("""
             ALTER TABLE users ADD COLUMN IF NOT EXISTS bottles INT DEFAULT 0;
-            ALTER TABLE users ADD COLUMN IF NOT EXISTS last_bonus_claim TIMESTAMP WITH TIME ZONE;
         """)
     logging.info("База данных PostgreSQL успешно инициализирована.")
 
@@ -182,37 +169,7 @@ async def activate_check_db(check_id: str):
     async with db_pool.acquire() as conn:
         await conn.execute("UPDATE checks SET is_activated = 1 WHERE check_id = $1", check_id)
 
-async def create_promo_code_db(code: str, reward: int):
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO promo_codes (code, reward) VALUES ($1, $2) ON CONFLICT (code) DO UPDATE SET reward = EXCLUDED.reward",
-            code.upper(), reward
-        )
-
-async def claim_promo_code_db(code: str, user_id: int):
-    code_clean = code.upper()
-    async with db_pool.acquire() as conn:
-        promo = await conn.fetchrow("SELECT * FROM promo_codes WHERE code = $1", code_clean)
-        if not promo:
-            return "NOT_FOUND", 0
-
-        already_used = await conn.fetchval(
-            "SELECT 1 FROM promo_activations WHERE code = $1 AND user_id = $2", code_clean, user_id
-        )
-        if already_used:
-            return "ALREADY_USED", 0
-
-        await conn.execute("INSERT INTO promo_activations (code, user_id) VALUES ($1, $2)", code_clean, user_id)
-        await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", promo["reward"], user_id)
-        return "SUCCESS", promo["reward"]
-
-async def update_bonus_claim_time(user_id: int):
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE users SET last_bonus_claim = CURRENT_TIMESTAMP WHERE user_id = $1", user_id
-        )
-
-# === КЛАВИАТУРЫ (Исходный вариант без отдельных кнопок под Бонусы и Коды) ===
+# === КЛАВИАТУРЫ ===
 def main_reply_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -317,81 +274,6 @@ async def cmd_start(message: Message, command: CommandObject):
         )
 
     await message.answer(start_text, reply_markup=main_reply_keyboard())
-
-# === ЕЖЕДНЕВНЫЙ БОНУС ПО ТЕКСТОВОЙ КОМАНДЕ ===
-@dp.message(F.text.lower() == "бонус")
-async def msg_bonus(message: Message):
-    user = await get_user(message.from_user.id)
-    if not user:
-        user, _ = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
-
-    if user['is_banned']:
-        await message.answer("❌ Вы заблокированы в боте.")
-        return
-
-    now = datetime.now(timezone.utc)
-    if user["last_bonus_claim"]:
-        last_claim = user["last_bonus_claim"]
-        if last_claim.tzinfo is None:
-            last_claim = last_claim.replace(tzinfo=timezone.utc)
-            
-        next_claim = last_claim + timedelta(hours=24)
-        if now < next_claim:
-            time_left = next_claim - now
-            hours, remainder = divmod(int(time_left.total_seconds()), 3600)
-            minutes, _ = divmod(remainder, 60)
-            await message.answer(f"⏳ Вы уже получали бонус! Следующий доступен через {hours} ч. {minutes} мин.")
-            return
-
-    try:
-        chat_info = await bot.get_chat(message.from_user.id)
-        user_bio = chat_info.bio or ""
-    except Exception:
-        user_bio = ""
-
-    required_phrase = "Самая первая Чекушка @Checkushhka_Bot"
-    if required_phrase.lower() not in user_bio.lower():
-        await message.answer(
-            f"❌ Для получения бонуса добавьте в свое описание (био) Telegram фразу:\n`{required_phrase}`",
-            parse_mode="Markdown"
-        )
-        return
-
-    reward = random.randint(10, 60)
-    await update_balance(message.from_user.id, reward)
-    await update_bonus_claim_time(message.from_user.id)
-
-    await message.answer(
-        f"🎉 Вы получили ежедневный бонус **+{reward}** 💎 Чекушек!\nВозвращайтесь через 24 часа!",
-        parse_mode="Markdown"
-    )
-
-# === ОБРАБОТКА ПРОМОКОДОВ ИГРОКАМИ ===
-@dp.message(F.text.lower().startswith(("промо ", "промокод ")))
-async def process_promo_code(message: Message):
-    parts = message.text.strip().split(maxsplit=1)
-    if len(parts) < 2:
-        await message.answer("❌ Введите промокод! Пример: `промо СТАРТ`", parse_mode="Markdown")
-        return
-
-    code_input = parts[1].strip()
-    user, _ = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
-
-    if user["is_banned"]:
-        await message.answer("❌ Вы заблокированы.")
-        return
-
-    status, reward = await claim_promo_code_db(code_input, message.from_user.id)
-
-    if status == "NOT_FOUND":
-        await message.answer("❌ Такого промокода не существует или он недействителен.")
-    elif status == "ALREADY_USED":
-        await message.answer("⚠️ Вы уже активировали этот промокод!")
-    elif status == "SUCCESS":
-        await message.answer(
-            f"🎉 **Промокод успешно активирован!**\nВам начислено **+{reward}** 💎 Чекушек!",
-            parse_mode="Markdown"
-        )
 
 # === МАГАЗИН ===
 @dp.message(Command("shop", "магазин"))
@@ -653,33 +535,7 @@ async def process_successful_payment(message: Message):
     user = await get_user(message.from_user.id)
     await message.answer(f"✅ Пополнение успешно!\n💎 Баланс: {user['balance']} Чекушек", reply_markup=main_reply_keyboard())
 
-# === АДМИН-ОБРАБОТЧИК ===
-@dp.message(F.from_user.id.in_(ADMIN_IDS) & Command("addpromo"))
-async def cmd_add_promo(message: Message, command: CommandObject):
-    args = command.args.split() if command.args else []
-    if len(args) < 2 or not args[1].isdigit():
-        await message.answer("❌ Использование: `/addpromo КОД СУММА`\nПример: `/addpromo Чекушка 500`", parse_mode="Markdown")
-        return
-    
-    code, reward = args[0].strip(), int(args[1])
-    await create_promo_code_db(code, reward)
-    await message.answer(
-        f"🎟️ **Промокод создал!**\nКод: `{code.upper()}`\nНаграда: **{reward}** 💎 Чекушек",
-        parse_mode="Markdown"
-    )
-
-@dp.message(F.from_user.id.in_(ADMIN_IDS) & F.text.lower().startswith(("промокод ", "создатьпромо ", "создать промо ")))
-async def process_admin_create_promo_text(message: Message):
-    parts = message.text.strip().split()
-    if len(parts) >= 3 and parts[-1].isdigit():
-        code = parts[1].strip()
-        reward = int(parts[-1])
-        await create_promo_code_db(code, reward)
-        await message.answer(
-            f"🎟️ **Промокод создан!**\nКод: `{code.upper()}`\nНаграда: **{reward}** 💎 Чекушек",
-            parse_mode="Markdown"
-        )
-
+# === АДМИН-ОБРАБОТЧИК (ВЫДАЧА / СНЯТИЕ ЧЕКУШЕК) ===
 @dp.message(F.from_user.id.in_(ADMIN_IDS) & F.text.lower().startswith(("чекушка ", "выдать ", "+", "забрать ", "снять ", "-")))
 async def process_admin_text_commands(message: Message):
     text = message.text.strip()
