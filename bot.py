@@ -29,8 +29,8 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 db_pool = None
 
-# Регулярное выражение для точного перехвата игровых ставок
-GAME_BET_REGEX = r"^(?i)(футбол|баскетбол|дартс|боулинг|кубик|кости)\s+(?:ставка\s+)?(\d+)$"
+# Регулярное выражение без inline-флага (?i) для совместимости с Python 3.14
+GAME_BET_REGEX = r"^(футбол|баскетбол|дартс|боулинг|кубик|кости)\s+(?:ставка\s+)?(\d+)$"
 
 # ================= ВЕБ-СЕРВЕР И АВТО-ПИНГ =================
 
@@ -45,7 +45,7 @@ async def start_http_server():
     port = int(os.getenv("PORT", 8080))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"HTTP-сервер для запущен на порту {port}")
+    print(f"HTTP-сервер запущен на порту {port}")
 
 async def self_ping_task():
     await asyncio.sleep(10)
@@ -197,11 +197,11 @@ async def cmd_ref(message: Message):
         parse_mode="Markdown"
     )
 
-# ================= ИГРОВОЙ ОБРАБОТЧИК (ПРИОРИТЕТНЫЙ) =================
+# ================= ИГРОВОЙ ОБРАБОТЧИК =================
 
-@dp.message(F.text.regexp(GAME_BET_REGEX))
+@dp.message(F.text.regexp(GAME_BET_REGEX, flags=re.IGNORECASE))
 async def process_game_bet(message: Message):
-    match = re.match(GAME_BET_REGEX, message.text.strip())
+    match = re.match(GAME_BET_REGEX, message.text.strip(), flags=re.IGNORECASE)
     if not match:
         return
 
@@ -457,7 +457,7 @@ async def admin_create_promo(message: Message):
 async def main():
     await init_db()
     
-    # Запуск фонового веб-сервера (вызывается строго 1 раз)
+    # Единый запуск веб-сервера
     await start_http_server()
     asyncio.create_task(self_ping_task())
 
