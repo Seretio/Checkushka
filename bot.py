@@ -1,12 +1,14 @@
 import asyncio
-from datetime import datetime, timedelta, timezone
 import logging
 import os
 import random
 import uuid
+from datetime import datetime, timedelta, timezone
+
 import aiohttp
 import asyncpg
 from aiohttp import web
+
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
@@ -20,57 +22,41 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
-# === НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ===
+# =====================================================================
+# CONFIGURATION & CONSTANTS
+# =====================================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8950292427:AAHiJ26IAGA4cTwC4OAnJU3DxZUVE8Ld7xg")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "Checkushhka_Bot")
 DATABASE_URL = os.getenv("DATABASE_URL")
+PORT = int(os.getenv("PORT", 8080))
 
 admin_raw = os.getenv("ADMIN_IDS", "7837011810")
 ADMIN_IDS = [int(i.strip()) for i in admin_raw.split(",") if i.strip().isdigit()]
 if not ADMIN_IDS:
     ADMIN_IDS = [7837011810]
 
-PORT = int(os.getenv("PORT", 8080))
+PACKAGES = {
+    "buy_50": {"amount": 50, "stars": 30, "title": "50 Чекушек"},
+    "buy_100": {"amount": 100, "stars": 60, "title": "100 Чекушек"},
+    "buy_200": {"amount": 200, "stars": 120, "title": "200 Чекушек"},
+    "buy_300": {"amount": 300, "stars": 180, "title": "300 Чекушек"},
+}
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 db_pool = None
 
-# === МИНИМАЛЬНЫЙ HTTP-СЕРВЕР ===
-async def handle_ping(request):
-    return web.Response(text="Bot is running!")
-
-async def start_http_server():
-    app = web.Application()
-    app.router.add_get("/", handle_ping)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    logging.info(f"HTTP-сервер запущен на порту {PORT}")
-
-# === АВТОПИНГ СЕРВИСА ===
-async def self_ping_task():
-    url = "https://checkushka-yk10.onrender.com/"
-    await asyncio.sleep(10)
-    async with aiohttp.ClientSession() as session:
-        while True:
-            try:
-                async with session.get(url) as resp:
-                    logging.info(f"Автопинг выполнен ({url}): статус {resp.status}")
-            except Exception as e:
-                logging.error(f"Ошибка автопинга ({url}): {e}")
-            await asyncio.sleep(600)
-
-# === ИНИЦИАЛИЗА БД (POSTGRESQL) ===
+# =====================================================================
+# DATABASE MANAGEMENT
+# =====================================================================
 async def init_db():
     global db_pool
-    url = DATABASE_URL
-    if url and url.startswith("postgres://"):
-        url = url.replace("postgres://", "postgresql://", 1)
+    dsn = DATABASE_URL
+    if dsn and dsn.startswith("postgres://"):
+        dsn = dsn.replace("postgres://", "postgresql://", 1)
 
-    db_pool = await asyncpg.create_pool(dsn=url)
+    db_pool = await asyncpg.create_pool(dsn=dsn)
     async with db_pool.acquire() as conn:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -107,7 +93,7 @@ async def init_db():
             ALTER TABLE users ADD COLUMN IF NOT EXISTS bottles INT DEFAULT 0;
             ALTER TABLE users ADD COLUMN IF NOT EXISTS last_bonus_claim TIMESTAMP WITH TIME ZONE;
         """)
-    logging.info("База данных PostgreSQL успешно инициализирована.")
+    logging.info("База данных PostgreSQL успешно инициализирована с нуля.")
 
 async def get_or_create_user(user_id: int, first_name: str, username: str = None, referrer_id: int = None):
     async with db_pool.acquire() as conn:
@@ -116,25 +102,25 @@ async def get_or_create_user(user_id: int, first_name: str, username: str = None
 
         if not user:
             is_new = True
-            valid_referrer = referrer_id if referrer_id and referrer_id != user_id else None
-            if valid_referrer:
-                ref_exists = await conn.fetchval("SELECT user_id FROM users WHERE user_id = $1", valid_referrer)
-                if not ref_exists:
-                    valid_referrer = None
+            valid_ref = referrer_id if referrer_id and referrer_id != user_id else None
+            if valid_ref:
+                exists = await conn.fetchval("SELECT user_id FROM users WHERE user_id = $1", valid_ref)
+                if not exists:
+                    valid_ref = None
 
             await conn.execute(
                 "INSERT INTO users (user_id, first_name, username, balance, bottles, referrer_id) VALUES ($1, $2, $3, 100, 0, $4)",
-                user_id, first_name, username, valid_referrer
+                user_id, first_name, username, valid_ref
             )
 
-            if valid_referrer:
+            if valid_ref:
                 await conn.execute(
                     "UPDATE users SET balance = balance + 1, ref_count = ref_count + 1, ref_balance = ref_balance + 1 WHERE user_id = $1",
-                    valid_referrer
+                    valid_ref
                 )
                 try:
                     await bot.send_message(
-                        chat_id=valid_referrer,
+                        chat_id=valid_ref,
                         text=f"👤 Пользователь **{first_name}** перешел по твоей реферальной ссылке! Начислена 1 💎 Чекушка.",
                         parse_mode="Markdown"
                     )
@@ -142,20 +128,18 @@ async def get_or_create_user(user_id: int, first_name: str, username: str = None
                     pass
 
             user = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
-
     return user, is_new
-
-async def get_user_by_id_or_username(identifier: str):
-    async with db_pool.acquire() as conn:
-        identifier = identifier.replace("@", "").strip()
-        if identifier.isdigit():
-            return await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", int(identifier))
-        else:
-            return await conn.fetchrow("SELECT * FROM users WHERE LOWER(username) = LOWER($1)", identifier)
 
 async def get_user(user_id: int):
     async with db_pool.acquire() as conn:
         return await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
+
+async def get_user_by_id_or_username(identifier: str):
+    async with db_pool.acquire() as conn:
+        clean_id = identifier.replace("@", "").strip()
+        if clean_id.isdigit():
+            return await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", int(clean_id))
+        return await conn.fetchrow("SELECT * FROM users WHERE LOWER(username) = LOWER($1)", clean_id)
 
 async def update_balance(user_id: int, amount: int):
     async with db_pool.acquire() as conn:
@@ -165,13 +149,14 @@ async def update_bottles(user_id: int, amount: int):
     async with db_pool.acquire() as conn:
         await conn.execute("UPDATE users SET bottles = bottles + $1 WHERE user_id = $2", amount, user_id)
 
+async def update_bonus_claim_time(user_id: int):
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE users SET last_bonus_claim = CURRENT_TIMESTAMP WHERE user_id = $1", user_id)
+
 async def create_check_db(creator_id: int, amount: int) -> str:
     check_id = str(uuid.uuid4())[:8]
     async with db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO checks (check_id, creator_id, amount) VALUES ($1, $2, $3)",
-            check_id, creator_id, amount
-        )
+        await conn.execute("INSERT INTO checks (check_id, creator_id, amount) VALUES ($1, $2, $3)", check_id, creator_id, amount)
     return check_id
 
 async def get_check_db(check_id: str):
@@ -195,24 +180,16 @@ async def claim_promo_code_db(code: str, user_id: int):
         promo = await conn.fetchrow("SELECT * FROM promo_codes WHERE code = $1", code_clean)
         if not promo:
             return "NOT_FOUND", 0
-
-        already_used = await conn.fetchval(
-            "SELECT 1 FROM promo_activations WHERE code = $1 AND user_id = $2", code_clean, user_id
-        )
-        if already_used:
+        already = await conn.fetchval("SELECT 1 FROM promo_activations WHERE code = $1 AND user_id = $2", code_clean, user_id)
+        if already:
             return "ALREADY_USED", 0
-
         await conn.execute("INSERT INTO promo_activations (code, user_id) VALUES ($1, $2)", code_clean, user_id)
         await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", promo["reward"], user_id)
         return "SUCCESS", promo["reward"]
 
-async def update_bonus_claim_time(user_id: int):
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE users SET last_bonus_claim = CURRENT_TIMESTAMP WHERE user_id = $1", user_id
-        )
-
-# === КЛАВИАТУРЫ ===
+# =====================================================================
+# KEYBOARDS
+# =====================================================================
 def main_reply_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -227,11 +204,7 @@ def profile_inline_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💎 Пополнить", callback_data="deposit")]])
 
 def shop_inline_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🍾 Купить бутылку", callback_data="buy_bottle")]
-        ]
-    )
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🍾 Купить бутылку", callback_data="buy_bottle")]])
 
 def deposit_keyboard():
     return InlineKeyboardMarkup(
@@ -252,13 +225,11 @@ def games_keyboard():
     )
 
 def bonus_inline_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🎁 Получить бонус", callback_data="claim_daily_bonus")]
-        ]
-    )
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎁 Получить бонус", callback_data="claim_daily_bonus")]])
 
-# === СТАРТ И ОБРАБОТКА ЧЕКОВ ===
+# =====================================================================
+# BOT HANDLERS & LOGIC
+# =====================================================================
 @dp.message(CommandStart())
 async def cmd_start(message: Message, command: CommandObject):
     args = command.args.strip() if command.args else None
@@ -266,28 +237,20 @@ async def cmd_start(message: Message, command: CommandObject):
     if args and args.startswith("check_"):
         check_id = args.replace("check_", "")
         check = await get_check_db(check_id)
-        
         if not check:
             await message.answer("❌ Чек не найден или недействителен.")
             return
-
         if check["is_activated"]:
             await message.answer("⚠️ Этот чек уже был кем-то активирован.")
             return
 
-        receiver, _ = await get_or_create_user(
-            user_id=message.from_user.id,
-            first_name=message.from_user.first_name,
-            username=message.from_user.username
-        )
-
+        receiver, _ = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
         if receiver["is_banned"]:
             await message.answer("❌ Вы заблокированы в боте.")
             return
 
         await activate_check_db(check_id)
         await update_balance(receiver["user_id"], check["amount"])
-
         await message.answer(f"🎉 Вы активировали чек на **{check['amount']}** 💎 Чекушек!", parse_mode="Markdown")
 
         try:
@@ -300,33 +263,22 @@ async def cmd_start(message: Message, command: CommandObject):
             pass
         return
 
-    referrer_id = int(args) if args and args.isdigit() else None
+    ref_id = int(args) if args and args.isdigit() else None
     user, is_new = await get_or_create_user(
         user_id=message.from_user.id,
         first_name=message.from_user.first_name,
         username=message.from_user.username,
-        referrer_id=referrer_id,
+        referrer_id=ref_id
     )
 
     if user['is_banned']:
         await message.answer("❌ Вы заблокированы в боте.")
         return
 
-    if is_new:
-        start_text = (
-            "Привет! 👋 Добро пожаловать в «Чекушку»!\n"
-            "Вам начислено 100 💎 Чекушек на старт!\n"
-            "Выберите действие ниже 👇"
-        )
-    else:
-        start_text = (
-            "Привет! 👋 Добро пожаловать в «Чекушку»!\n"
-            "Выберите действие ниже 👇"
-        )
+    text = "Привет! 👋 Добро пожаловать в «Чекушку»!\n"
+    text += "Вам начислено 100 💎 Чекушек на старт!\nВыберите действие ниже 👇" if is_new else "Выберите действие ниже 👇"
+    await message.answer(text, reply_markup=main_reply_keyboard())
 
-    await message.answer(start_text, reply_markup=main_reply_keyboard())
-
-# === ОБРАБОТКА ЕЖЕДНЕВНОГО БОНУСА ===
 @dp.message(F.text.lower().in_(["бонус", "🎁 бонус"]))
 async def msg_bonus(message: Message):
     user = await get_user(message.from_user.id)
@@ -356,50 +308,36 @@ async def cb_claim_bonus(call: CallbackQuery):
         return
 
     now = datetime.now(timezone.utc)
-
     if user["last_bonus_claim"]:
         last_claim = user["last_bonus_claim"]
         if last_claim.tzinfo is None:
             last_claim = last_claim.replace(tzinfo=timezone.utc)
-            
         next_claim = last_claim + timedelta(hours=24)
         if now < next_claim:
-            time_left = next_claim - now
-            hours, remainder = divmod(int(time_left.total_seconds()), 3600)
-            minutes, _ = divmod(remainder, 60)
-            await call.answer(
-                f"⏳ Бонус уже получен! Следующий будет доступен через {hours} ч. {minutes} мин.",
-                show_alert=True
-            )
+            diff = next_claim - now
+            h, rem = divmod(int(diff.total_seconds()), 3600)
+            m, _ = divmod(rem, 60)
+            await call.answer(f"⏳ Бонус уже получен! Доступен через {h} ч. {m} мин.", show_alert=True)
             return
 
     try:
-        chat_info = await bot.get_chat(call.from_user.id)
-        user_bio = chat_info.bio or ""
-    except Exception as e:
-        logging.error(f"Ошибка получения био: {e}")
-        user_bio = ""
+        chat = await bot.get_chat(call.from_user.id)
+        bio = chat.bio or ""
+    except Exception:
+        bio = ""
 
-    required_phrase = "Самая первая Чекушка @Checkushhka_Bot"
-    if required_phrase.lower() not in user_bio.lower():
-        await call.message.answer(
-            f"❌ У тебя не установлена нужная фраза в био!\nДобавь: `{required_phrase}`",
-            parse_mode="Markdown"
-        )
+    req_phrase = "Самая первая Чекушка @Checkushhka_Bot"
+    if req_phrase.lower() not in bio.lower():
+        await call.message.answer(f"❌ У тебя не установлена нужная фраза в био!\nДобавь: `{req_phrase}`", parse_mode="Markdown")
         await call.answer()
         return
 
     reward = random.randint(10, 60)
     await update_balance(call.from_user.id, reward)
     await update_bonus_claim_time(call.from_user.id)
-
-    await call.message.answer(
-        f"🎉 Вы получили бонус **+{reward}** 💎 Чекушек!\nВозвращайтесь через 24 часа!",
-        parse_mode="Markdown"
-    )
+    await call.message.answer(f"🎉 Вы получили бонус **+{reward}** 💎 Чекушек!\nВозвращайтесь через 24 часа!", parse_mode="Markdown")
     await call.answer()
 
-# === ОБРАБОТКА ПРОМОКОДОВ ИГРОКАМИ ===
 @dp.message(F.text.lower().startswith(("промо ", "промокод ")))
 async def process_promo_code(message: Message):
     parts = message.text.strip().split(maxsplit=1)
@@ -407,26 +345,19 @@ async def process_promo_code(message: Message):
         await message.answer("❌ Введите промокод! Пример: `промо СТАРТ`", parse_mode="Markdown")
         return
 
-    code_input = parts[1].strip()
     user, _ = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
-
     if user["is_banned"]:
         await message.answer("❌ Вы заблокированы.")
         return
 
-    status, reward = await claim_promo_code_db(code_input, message.from_user.id)
-
+    status, reward = await claim_promo_code_db(parts[1].strip(), message.from_user.id)
     if status == "NOT_FOUND":
         await message.answer("❌ Такого промокода не существует или он недействителен.")
     elif status == "ALREADY_USED":
         await message.answer("⚠️ Вы уже активировали этот промокод!")
     elif status == "SUCCESS":
-        await message.answer(
-            f"🎉 **Промокод успешно активирован!**\nВам начислено **+{reward}** 💎 Чекушек!",
-            parse_mode="Markdown"
-        )
+        await message.answer(f"🎉 **Промокод успешно активирован!**\nВам начислено **+{reward}** 💎 Чекушек!", parse_mode="Markdown")
 
-# === МАГАЗИН ===
 @dp.message(Command("shop", "магазин"))
 @dp.message(F.text.lower().in_(["магазин", "🛒 магазин"]))
 async def msg_shop(message: Message):
@@ -438,11 +369,7 @@ async def msg_shop(message: Message):
         await message.answer("❌ Вы заблокированы в боте.")
         return
 
-    text = (
-        "🛒 **МАГАЗИН**\n\n"
-        "🍾 **Бутылка** — 5 Чекушек\n"
-        "Одноразовый предмет."
-    )
+    text = "🛒 **МАГАЗИН**\n\n🍾 **Бутылка** — 5 Чекушек\nОдноразовый предмет."
     await message.answer(text, parse_mode="Markdown", reply_markup=shop_inline_keyboard())
 
 @dp.callback_query(F.data == "buy_bottle")
@@ -461,11 +388,9 @@ async def cb_buy_bottle(call: CallbackQuery):
 
     await update_balance(call.from_user.id, -5)
     await update_bottles(call.from_user.id, 1)
-
     await call.message.answer("✅ Ты купил 🍾 бутылку за 5 Чекушек!")
     await call.answer()
 
-# === РЕФЕРАЛЬНАЯ СИСТЕМА ===
 @dp.message(F.text.lower().in_(["рефералка", "🔗 рефералка", "рефералы"]))
 async def msg_referral(message: Message):
     user = await get_user(message.from_user.id)
@@ -477,17 +402,15 @@ async def msg_referral(message: Message):
         return
 
     ref_link = f"https://t.me/{BOT_USERNAME}?start={user['user_id']}"
-    
     text = (
         "🔗 **Реферальная программа**\n\n"
-        f"Приглашайте друзей и получайте **1 💎 Чекушку** за каждого зашедшего пользователя!\n\n"
+        "Приглашайте друзей и получайте **1 💎 Чекушку** за каждого зашедшего пользователя!\n\n"
         f"👥 Приглашено рефералов: **{user['ref_count']}**\n"
         f"💰 Заработано с рефералов: **{user['ref_balance']}** 💎\n\n"
         f"Ваша реферальная ссылка:\n`{ref_link}`"
     )
     await message.answer(text, parse_mode="Markdown")
 
-# === ОБРАБОТКА ПЕРЕВОДОВ И СОЗДАНИЯ ЧЕКОВ ===
 @dp.message(F.text.lower().startswith(("дать ", "перевести ", "перевод ")))
 async def process_transfer(message: Message):
     parts = message.text.strip().split()
@@ -498,7 +421,6 @@ async def process_transfer(message: Message):
         return
 
     amount, target_str = 0, None
-
     if message.reply_to_message and len(parts) >= 2 and parts[1].isdigit():
         amount = int(parts[1])
         target_str = str(message.reply_to_message.from_user.id)
@@ -525,10 +447,7 @@ async def process_transfer(message: Message):
 
     await update_balance(sender["user_id"], -amount)
     await update_balance(target_user["user_id"], amount)
-
-    await message.answer(
-        f"✅ Вы успешно перевели {amount} 💎 Чекушек пользователю {target_user['first_name']}!"
-    )
+    await message.answer(f"✅ Вы успешно перевели {amount} 💎 Чекушек пользователю {target_user['first_name']}!")
 
 @dp.message(F.text.lower().startswith(("чек ", "создать чек ")))
 async def process_create_check(message: Message):
@@ -539,12 +458,7 @@ async def process_create_check(message: Message):
         await message.answer("❌ Вы заблокированы.")
         return
 
-    amount = 0
-    for part in parts:
-        if part.isdigit():
-            amount = int(part)
-            break
-
+    amount = next((int(p) for p in parts if p.isdigit()), 0)
     if amount <= 0:
         await message.answer("❌ Использование: `чек [сумма]` (например: `чек 50`)", parse_mode="Markdown")
         return
@@ -555,7 +469,6 @@ async def process_create_check(message: Message):
 
     await update_balance(sender["user_id"], -amount)
     check_id = await create_check_db(sender["user_id"], amount)
-    
     check_link = f"https://t.me/{BOT_USERNAME}?start=check_{check_id}"
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎁 Забрать чек", url=check_link)]])
 
@@ -565,16 +478,10 @@ async def process_create_check(message: Message):
         reply_markup=kb
     )
 
-# === ОБРАБОТКА КОМАНД В ЧАТАХ И ГРУППАХ ===
 @dp.message(F.text.lower().in_(["чекушка", "профиль", "👤 профиль"]))
 async def msg_profile(message: Message):
     if message.reply_to_message and message.text.lower().strip() == "чекушка":
-        attacker, _ = await get_or_create_user(
-            user_id=message.from_user.id,
-            first_name=message.from_user.first_name,
-            username=message.from_user.username
-        )
-
+        attacker, _ = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
         if attacker['is_banned']:
             await message.answer("❌ Вы заблокированы в боте.")
             return
@@ -583,14 +490,13 @@ async def msg_profile(message: Message):
             await message.answer("❌ У вас нет 🍾 бутылки! Купите ее в магазине `/shop` за 5 Чекушек.")
             return
 
-        victim_user = message.reply_to_message.from_user
-        if victim_user.id == attacker["user_id"]:
+        victim = message.reply_to_message.from_user
+        if victim.id == attacker["user_id"]:
             await message.answer("❌ Нельзя ударить самого себя!")
             return
 
         await update_bottles(attacker["user_id"], -1)
-
-        await message.answer(f"🍾 {attacker['first_name']} ударил {victim_user.first_name} бутылкой!")
+        await message.answer(f"🍾 {attacker['first_name']} ударил {victim.first_name} бутылкой!")
         return
 
     user = await get_user(message.from_user.id)
@@ -601,13 +507,12 @@ async def msg_profile(message: Message):
         await message.answer("❌ Вы заблокированы в боте.")
         return
 
-    bottles_cnt = user.get("bottles", 0)
     text = (
         "👤 **Ваш профиль**\n"
         f"├ 👤 {user['first_name']}\n"
         f"├ 🆔 ID: `{user['user_id']}`\n"
         f"├ 💎 Чекушок: {user['balance']}\n"
-        f"└ 🍾 Бутылок: {bottles_cnt}"
+        f"└ 🍾 Бутылок: {user.get('bottles', 0)}"
     )
     await message.answer(text, parse_mode="Markdown", reply_markup=profile_inline_keyboard())
 
@@ -639,14 +544,6 @@ async def msg_deposit(message: Message):
         "└ 💎 300 Чекушек — 180 ⭐"
     )
     await message.answer(text, reply_markup=deposit_keyboard())
-
-# === ПОПОЛНЕНИЕ СТАРЗ ===
-PACKAGES = {
-    "buy_50": {"amount": 50, "stars": 30, "title": "50 Чекушек"},
-    "buy_100": {"amount": 100, "stars": 60, "title": "100 Чекушек"},
-    "buy_200": {"amount": 200, "stars": 120, "title": "200 Чекушек"},
-    "buy_300": {"amount": 300, "stars": 180, "title": "300 Чекушек"},
-}
 
 @dp.callback_query(F.data == "deposit")
 async def cb_deposit(call: CallbackQuery):
@@ -680,62 +577,47 @@ async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery):
 
 @dp.message(F.successful_payment)
 async def process_successful_payment(message: Message):
-    payload = message.successful_payment.invoice_payload
-    added_amount = int(payload.split("_")[1])
-    await update_balance(message.from_user.id, added_amount)
+    added = int(message.successful_payment.invoice_payload.split("_")[1])
+    await update_balance(message.from_user.id, added)
     user = await get_user(message.from_user.id)
     await message.answer(f"✅ Пополнение успешно!\n💎 Баланс: {user['balance']} Чекушек", reply_markup=main_reply_keyboard())
 
-# === АДМИН-ОБРАБОТЧИК ===
+# =====================================================================
+# ADMIN PANEL LOGIC
+# =====================================================================
 @dp.message(F.from_user.id.in_(ADMIN_IDS) & Command("addpromo"))
 async def cmd_add_promo(message: Message, command: CommandObject):
     args = command.args.split() if command.args else []
     if len(args) < 2 or not args[1].isdigit():
         await message.answer("❌ Использование: `/addpromo КОД СУММА`\nПример: `/addpromo Чекушка 500`", parse_mode="Markdown")
         return
-    
     code, reward = args[0].strip(), int(args[1])
     await create_promo_code_db(code, reward)
-    await message.answer(
-        f"🎟️ **Промокод создал!**\nКод: `{code.upper()}`\nНаграда: **{reward}** 💎 Чекушек",
-        parse_mode="Markdown"
-    )
+    await message.answer(f"🎟️ **Промокод создан!**\nКод: `{code.upper()}`\nНаграда: **{reward}** 💎 Чекушек", parse_mode="Markdown")
 
 @dp.message(F.from_user.id.in_(ADMIN_IDS) & F.text.lower().startswith(("промокод ", "создатьпромо ", "создать промо ")))
 async def process_admin_create_promo_text(message: Message):
     parts = message.text.strip().split()
     if len(parts) >= 3 and parts[-1].isdigit():
-        code = parts[1].strip()
-        reward = int(parts[-1])
+        code, reward = parts[1].strip(), int(parts[-1])
         await create_promo_code_db(code, reward)
-        await message.answer(
-            f"🎟️ **Промокод создан!**\nКод: `{code.upper()}`\nНаграда: **{reward}** 💎 Чекушек",
-            parse_mode="Markdown"
-        )
+        await message.answer(f"🎟️ **Промокод создан!**\nКод: `{code.upper()}`\nНаграда: **{reward}** 💎 Чекушек", parse_mode="Markdown")
 
 @dp.message(F.from_user.id.in_(ADMIN_IDS) & F.text.lower().startswith(("чекушка ", "выдать ", "+", "забрать ", "снять ", "-")))
 async def process_admin_text_commands(message: Message):
-    text = message.text.strip()
-    parts = text.split()
-
-    first_word = parts[0].lower()
-    action = "add" if first_word in ["чекушка", "выдать", "+"] else "sub"
-    amount = 0
-    target_str = None
+    parts = message.text.strip().split()
+    action = "add" if parts[0].lower() in ["чекушка", "выдать", "+"] else "sub"
+    amount, target_str = 0, None
 
     if message.reply_to_message:
         target_str = str(message.reply_to_message.from_user.id)
-        for part in parts[1:]:
-            if part.isdigit():
-                amount = int(part)
-                break
+        amount = next((int(p) for p in parts[1:] if p.isdigit()), 0)
     else:
         for part in parts[1:]:
             if part.isdigit():
                 amount = int(part)
             else:
                 target_str = part
-
         if not target_str:
             target_str = str(message.from_user.id)
 
@@ -750,19 +632,20 @@ async def process_admin_text_commands(message: Message):
     if action == "add":
         await update_balance(target_user['user_id'], amount)
         await message.answer(f"✅ Выдали {amount} 💎 Чекушек пользователю {target_user['first_name']}.")
-    elif action == "sub":
+    else:
         await update_balance(target_user['user_id'], -amount)
         await message.answer(f"⚠️ Забрали {amount} 💎 Чекушек у пользователя {target_user['first_name']}.")
 
-# === ИГРОКОВЫЕ КНОПКИ И СТАВКИ ===
+# =====================================================================
+# GAME ENGINE & BETS
+# =====================================================================
 @dp.callback_query(F.data.startswith("game_"))
 async def cb_game_info(call: CallbackQuery):
-    game_type = call.data.split("_")[1]
+    g_type = call.data.split("_")[1]
     names = {"football": "футбол", "basketball": "баскетбол", "darts": "дартс", "bowling": "боулинг", "dice": "кубик"}
-    await call.message.answer(f"Чтобы сыграть, напишите в чат: `{names.get(game_type, 'игру')} [ставка]`\nНапример: `{names.get(game_type, 'игру')} 10`", parse_mode="Markdown")
+    await call.message.answer(f"Чтобы сыграть, напишите в чат: `{names.get(g_type, 'игру')} [ставка]`\nНапример: `{names.get(g_type, 'игру')} 10`", parse_mode="Markdown")
     await call.answer()
 
-# Надежный обработчик игр с полной поддержкой всех костей и исправлением Python 3.14
 @dp.message(F.text)
 async def process_game_bet(message: Message):
     if not message.text:
@@ -780,38 +663,20 @@ async def process_game_bet(message: Message):
         "кости": ("🎲", "dice")
     }
 
-    found_game = None
-    for game_keyword in game_map.keys():
-        if game_keyword in parts:
-            found_game = game_keyword
-            break
-
+    found_game = next((k for k in game_map.keys() if k in parts), None)
     if not found_game:
         return
 
-    bet = None
-    for part in parts:
-        if part.isdigit():
-            bet = int(part)
-            break
-
+    bet = next((int(p) for p in parts if p.isdigit()), None)
     if bet is None:
-        await message.answer(
-            f"❌ Укажите сумму ставки цифрами!\nПример: `{found_game} 10` или `{found_game} ставка 10`",
-            parse_mode="Markdown"
-        )
+        await message.answer(f"❌ Укажите сумму ставки цифрами!\nПример: `{found_game} 10` или `{found_game} ставка 10`", parse_mode="Markdown")
         return
 
     if bet <= 0:
         await message.answer("❌ Ставка должна быть больше 0!")
         return
 
-    user, _ = await get_or_create_user(
-        user_id=message.from_user.id,
-        first_name=message.from_user.first_name,
-        username=message.from_user.username
-    )
-
+    user, _ = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
     if user['is_banned']:
         await message.answer("❌ Вы заблокированы.")
         return
@@ -821,7 +686,6 @@ async def process_game_bet(message: Message):
         return
 
     await update_balance(message.from_user.id, -bet)
-    
     emoji, game_code = game_map[found_game]
     
     try:
@@ -830,7 +694,7 @@ async def process_game_bet(message: Message):
     except Exception as e:
         await update_balance(message.from_user.id, bet)
         logging.error(f"Ошибка отправки dice: {e}")
-        await message.answer("❌ Ошибка отправки анимации. Убедитесь, что у бота есть права отправлять эмодзи/стикеры. Ставка возвращена!")
+        await message.answer("❌ Ошибка отправки анимации. Ставка возвращена!")
         return
 
     await asyncio.sleep(2.5)
@@ -838,91 +702,80 @@ async def process_game_bet(message: Message):
     if game_code == "bowling":
         if val == 6:
             coeff = random.uniform(2.5, 3.5) if bet < 10 else (random.uniform(2.0, 2.5) if bet < 100 else random.uniform(1.6, 2.0))
-            total_payout = int(bet * coeff)
-            await update_balance(message.from_user.id, total_payout)
+            payout = int(bet * coeff)
+            await update_balance(message.from_user.id, payout)
             new_user = await get_user(message.from_user.id)
-            profit = total_payout - bet
-            
-            await message.answer(
-                f"🎉 **СТРАЙК! Сбиты абсолютно все кегли!**\n"
-                f"Выигрыш: +{total_payout} 💎 Чекушек (Прибыль: +{profit} 💎)!\n"
-                f"Ваш баланс: {new_user['balance']} 💎",
-                parse_mode="Markdown"
-            )
-
+            await message.answer(f"🎉 **СТРАЙК! Сбиты абсолютно все кегли!**\nВыигрыш: +{payout} 💎 Чекушек!\nВаш баланс: {new_user['balance']} 💎", parse_mode="Markdown")
         elif val == 5:
             coeff = random.uniform(1.8, 2.2) if bet < 10 else (random.uniform(1.5, 1.8) if bet < 100 else random.uniform(1.3, 1.5))
-            total_payout = int(bet * coeff)
-            await update_balance(message.from_user.id, total_payout)
+            payout = int(bet * coeff)
+            await update_balance(message.from_user.id, payout)
             new_user = await get_user(message.from_user.id)
-            profit = total_payout - bet
-
-            await message.answer(
-                f"🔥 **ПОЧТИ СТРАЙК! Сбиты все кегли, кроме одной!**\n"
-                f"Выигрыш: +{total_payout} 💎 Чекушек (Прибыль: +{profit} 💎)!\n"
-                f"Ваш баланс: {new_user['balance']} 💎",
-                parse_mode="Markdown"
-            )
-
+            await message.answer(f"🔥 **ПОЧТИ СТРАЙК!**\nВыигрыш: +{payout} 💎 Чекушек!\nВаш баланс: {new_user['balance']} 💎", parse_mode="Markdown")
         elif val == 4:
             coeff = random.uniform(1.4, 1.6) if bet < 10 else (random.uniform(1.2, 1.4) if bet < 100 else random.uniform(1.1, 1.25))
-            total_payout = int(bet * coeff)
-            await update_balance(message.from_user.id, total_payout)
+            payout = int(bet * coeff)
+            await update_balance(message.from_user.id, payout)
             new_user = await get_user(message.from_user.id)
-            profit = total_payout - bet
-
-            await message.answer(
-                f"👍 **ХОРОШИЙ БРОСОК! Сбиты почти все кегли (осталось 2)!**\n"
-                f"Выигрыш: +{total_payout} 💎 Чекушек (Прибыль: +{profit} 💎)!\n"
-                f"Ваш баланс: {new_user['balance']} 💎",
-                parse_mode="Markdown"
-            )
-
+            await message.answer(f"👍 **ХОРОШИЙ БРОСОК!**\nВыигрыш: +{payout} 💎 Чекушек!\nВаш баланс: {new_user['balance']} 💎", parse_mode="Markdown")
         else:
             new_user = await get_user(message.from_user.id)
-            await message.answer(
-                f"🎳 **Сбито всего {val} кегли(ей)!**\n"
-                f"Выигрыш: **0 💎 Чекушек**.\n"
-                f"Ваш баланс: {new_user['balance']} 💎",
-                parse_mode="Markdown"
-            )
+            await message.answer(f"🎳 **Сбито кеглей: {val}**\nВыигрыш: **0 💎**\nВаш баланс: {new_user['balance']} 💎", parse_mode="Markdown")
         return
 
-    is_win = False
-    if game_code == "football" and val in [3, 4, 5]:
-        is_win = True
-    elif game_code == "basketball" and val in [4, 5]:
-        is_win = True
-    elif game_code == "darts" and val == 6:
-        is_win = True
-    elif game_code == "dice" and val in [4, 5, 6]:
-        is_win = True
+    is_win = (
+        (game_code == "football" and val in [3, 4, 5]) or
+        (game_code == "basketball" and val in [4, 5]) or
+        (game_code == "darts" and val == 6) or
+        (game_code == "dice" and val in [4, 5, 6])
+    )
 
     if is_win:
         coeff = random.uniform(1.8, 2.5) if bet < 10 else (random.uniform(1.4, 1.8) if bet < 100 else random.uniform(1.2, 1.5))
-        total_payout = int(bet * coeff)
-        await update_balance(message.from_user.id, total_payout)
+        payout = int(bet * coeff)
+        await update_balance(message.from_user.id, payout)
         new_user = await get_user(message.from_user.id)
-        
-        profit = total_payout - bet
-        await message.answer(
-            f"🎉 **ПОБЕДА!**\nВыигрыш: +{total_payout} 💎 Чекушек (Прибыль: +{profit} 💎)!\nВаш баланс: {new_user['balance']} 💎",
-            parse_mode="Markdown"
-        )
+        await message.answer(f"🎉 **ПОБЕДА!**\nВыигрыш: +{payout} 💎 Чекушек!\nВаш баланс: {new_user['balance']} 💎", parse_mode="Markdown")
     else:
         new_user = await get_user(message.from_user.id)
-        await message.answer(
-            f"❌ **ПРОИГРЫШ!**\nВы потеряли: {bet} 💎 Чекушек.\nВаш баланс: {new_user['balance']} 💎",
-            parse_mode="Markdown"
-        )
+        await message.answer(f"❌ **ПРОИГРЫШ!**\nПотеряно: {bet} 💎 Чекушек.\nВаш баланс: {new_user['balance']} 💎", parse_mode="Markdown")
 
-# === ЗАПУСК ===
+# =====================================================================
+# SERVER & SELF PING tasks
+# =====================================================================
+async def handle_ping(request):
+    return web.Response(text="Bot running cleanly!")
+
+async def start_http_server():
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    logging.info(f"HTTP сервер активен на порту {PORT}")
+
+async def self_ping_task():
+    url = "https://checkushka-yk10.onrender.com/"
+    await asyncio.sleep(10)
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                async with session.get(url) as resp:
+                    logging.info(f"Self-ping ok ({url}): status {resp.status}")
+            except Exception as e:
+                logging.error(f"Self-ping error: {e}")
+            await asyncio.sleep(600)
+
+# =====================================================================
+# MAIN ENTRY POINT
+# =====================================================================
 async def main():
     await init_db()
     await start_http_server()
     asyncio.create_task(self_ping_task())
 
-    print("Бот запущен на PostgreSQL!")
+    print("Чистый бот полностью переписан и запущен!")
     await dp.start_polling(bot, allowed_updates=["message", "callback_query", "pre_checkout_query"])
 
 if __name__ == "__main__":
