@@ -63,7 +63,7 @@ async def self_ping_task():
                 logging.error(f"Ошибка автопинга ({url}): {e}")
             await asyncio.sleep(600)
 
-# === ИНИЦИАЛИЗА БД И РАБОТА С ПОЛЬЗОВАТЕЛЯМИ И ЧЕКАМИ (POSTGRESQL) ===
+# === ИНИЦИАЛИЗА БД (POSTGRESQL) ===
 async def init_db():
     global db_pool
     url = DATABASE_URL
@@ -182,7 +182,6 @@ async def activate_check_db(check_id: str):
     async with db_pool.acquire() as conn:
         await conn.execute("UPDATE checks SET is_activated = 1 WHERE check_id = $1", check_id)
 
-# === ВПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ПРОМОКОДОВ И БОНУСА ===
 async def create_promo_code_db(code: str, reward: int):
     async with db_pool.acquire() as conn:
         await conn.execute(
@@ -292,7 +291,6 @@ async def cmd_start(message: Message, command: CommandObject):
         await message.answer(f"🎉 Вы активировали чек на **{check['amount']}** 💎 Чекушек!", parse_mode="Markdown")
 
         try:
-            creator = await get_user(check["creator_id"])
             await bot.send_message(
                 chat_id=check["creator_id"],
                 text=f"🔔 Пользователь {receiver['first_name']} (@{receiver['username'] or 'без юзернейма'}) активировал ваш чек на **{check['amount']}** 💎 Чекушек!",
@@ -702,21 +700,10 @@ async def cmd_add_promo(message: Message, command: CommandObject):
         parse_mode="Markdown"
     )
 
-@dp.message(F.from_user.id.in_(ADMIN_IDS) & F.text)
+@dp.message(F.from_user.id.in_(ADMIN_IDS) & F.text.lower().startswith(("чекушка ", "выдать ", "+", "забрать ", "снять ", "-")))
 async def process_admin_text_commands(message: Message):
     text = message.text.strip()
     parts = text.split()
-
-    if len(parts) >= 3 and parts[0].lower() in ["создатьпромо", "промокод"]:
-        code = parts[1].strip()
-        if parts[2].isdigit():
-            reward = int(parts[2])
-            await create_promo_code_db(code, reward)
-            await message.answer(
-                f"🎟️ **Промокод создан!**\nКод: `{code.upper()}`\nНаграда: **{reward}** 💎 Чекушек",
-                parse_mode="Markdown"
-            )
-            return
 
     action, amount, target_str = None, 0, None
 
@@ -734,7 +721,6 @@ async def process_admin_text_commands(message: Message):
             action, amount, target_str = "sub", int(parts[1]), str(message.reply_to_message.from_user.id)
 
     if not action or amount <= 0 or not target_str:
-        await process_game_bet(message)
         return
 
     target_user = await get_user_by_id_or_username(target_str)
