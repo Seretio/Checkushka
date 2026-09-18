@@ -690,7 +690,7 @@ async def process_successful_payment(message: Message):
 async def cmd_add_promo(message: Message, command: CommandObject):
     args = command.args.split() if command.args else []
     if len(args) < 2 or not args[1].isdigit():
-        await message.answer("❌ Использование: `/addpromo КОД СУММА`", parse_mode="Markdown")
+        await message.answer("❌ Использование: `/addpromo КОД СУММА`\nПример: `/addpromo Чекушка 500`", parse_mode="Markdown")
         return
     
     code, reward = args[0].strip(), int(args[1])
@@ -699,6 +699,18 @@ async def cmd_add_promo(message: Message, command: CommandObject):
         f"🎟️ **Промокод создан!**\nКод: `{code.upper()}`\nНаграда: **{reward}** 💎 Чекушек",
         parse_mode="Markdown"
     )
+
+@dp.message(F.from_user.id.in_(ADMIN_IDS) & F.text.lower().startswith(("промокод ", "создатьпромо ", "создать промо ")))
+async def process_admin_create_promo_text(message: Message):
+    parts = message.text.strip().split()
+    if len(parts) >= 3 and parts[-1].isdigit():
+        code = parts[1].strip()
+        reward = int(parts[-1])
+        await create_promo_code_db(code, reward)
+        await message.answer(
+            f"🎟️ **Промокод создан!**\nКод: `{code.upper()}`\nНаграда: **{reward}** 💎 Чекушек",
+            parse_mode="Markdown"
+        )
 
 @dp.message(F.from_user.id.in_(ADMIN_IDS) & F.text.lower().startswith(("чекушка ", "выдать ", "+", "забрать ", "снять ", "-")))
 async def process_admin_text_commands(message: Message):
@@ -735,7 +747,7 @@ async def process_admin_text_commands(message: Message):
         await update_balance(target_user['user_id'], -amount)
         await message.answer(f"⚠️ Забрали {amount} 💎 Чекушек у пользователя {target_user['first_name']}.")
 
-# === ИГРОВОЙ ОБРАБОТЧИК ===
+# === ИГРОКОВЫЕ КНОПКИ И СТАВКИ ===
 @dp.callback_query(F.data.startswith("game_"))
 async def cb_game_info(call: CallbackQuery):
     game_type = call.data.split("_")[1]
@@ -743,7 +755,7 @@ async def cb_game_info(call: CallbackQuery):
     await call.message.answer(f"Чтобы сыграть, напишите в чат: `{names.get(game_type, 'игру')} [ставка]`\nНапример: `{names.get(game_type, 'игру')} 10`", parse_mode="Markdown")
     await call.answer()
 
-@dp.message(F.text)
+@dp.message(F.text.lower().startswith(("футбол ", "баскетбол ", "дартс ", "боулинг ")))
 async def process_game_bet(message: Message):
     raw_text = message.text.replace(f"@{BOT_USERNAME}", "").strip()
     parts = raw_text.split()
@@ -755,7 +767,7 @@ async def process_game_bet(message: Message):
     game_map = {
         "футбол": ("⚽", "football"), 
         "баскетбол": ("🏀", "basketball"), 
-        "darts": ("🎯", "darts"),
+        "дартс": ("🎯", "darts"),
         "боулинг": ("🎳", "bowling")
     }
 
