@@ -103,7 +103,6 @@ async def init_db():
                 PRIMARY KEY (code, user_id)
             );
         """)
-        # Безопасное добавление колонок для существующих таблиц
         await conn.execute("""
             ALTER TABLE users ADD COLUMN IF NOT EXISTS bottles INT DEFAULT 0;
             ALTER TABLE users ADD COLUMN IF NOT EXISTS last_bonus_claim TIMESTAMP WITH TIME ZONE;
@@ -183,7 +182,7 @@ async def activate_check_db(check_id: str):
     async with db_pool.acquire() as conn:
         await conn.execute("UPDATE checks SET is_activated = 1 WHERE check_id = $1", check_id)
 
-# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ПРОМОКОДОВ И БОНУСА ===
+# === ВПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ПРОМОКОДОВ И БОНУСА ===
 async def create_promo_code_db(code: str, reward: int):
     async with db_pool.acquire() as conn:
         await conn.execute(
@@ -360,7 +359,6 @@ async def cb_claim_bonus(call: CallbackQuery):
 
     now = datetime.now(timezone.utc)
 
-    # Проверка таймера (24 часа)
     if user["last_bonus_claim"]:
         last_claim = user["last_bonus_claim"]
         if last_claim.tzinfo is None:
@@ -377,7 +375,6 @@ async def cb_claim_bonus(call: CallbackQuery):
             )
             return
 
-    # Проверка БИО пользователя
     try:
         chat_info = await bot.get_chat(call.from_user.id)
         user_bio = chat_info.bio or ""
@@ -394,7 +391,6 @@ async def cb_claim_bonus(call: CallbackQuery):
         await call.answer()
         return
 
-    # Выдача случайного бонуса
     reward = random.randint(10, 60)
     await update_balance(call.from_user.id, reward)
     await update_bonus_claim_time(call.from_user.id)
@@ -574,7 +570,6 @@ async def process_create_check(message: Message):
 # === ОБРАБОТКА КОМАНД В ЧАТАХ И ГРУППАХ ===
 @dp.message(F.text.lower().in_(["чекушка", "профиль", "👤 профиль"]))
 async def msg_profile(message: Message):
-    # Если это ответ на сообщение в группе с текстом "чекушка", обрабатываем удар бутылкой
     if message.reply_to_message and message.text.lower().strip() == "чекушка":
         attacker, _ = await get_or_create_user(
             user_id=message.from_user.id,
@@ -595,13 +590,11 @@ async def msg_profile(message: Message):
             await message.answer("❌ Нельзя ударить самого себя!")
             return
 
-        # Списываем 1 бутылку
         await update_bottles(attacker["user_id"], -1)
 
         await message.answer(f"🍾 {attacker['first_name']} ударил {victim_user.first_name} бутылкой!")
         return
 
-    # Если обычный вызов профиля
     user = await get_user(message.from_user.id)
     if not user:
         user, _ = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
@@ -695,14 +688,26 @@ async def process_successful_payment(message: Message):
     await message.answer(f"✅ Пополнение успешно!\n💎 Баланс: {user['balance']} Чекушек", reply_markup=main_reply_keyboard())
 
 # === АДМИН-ОБРАБОТЧИК ===
-@dp.message(Command("addpromo"))
+@dp.message(F.from_user.id.in_(ADMIN_IDS) & Command("addpromo"))
+async def cmd_add_promo(message: Message, command: CommandObject):
+    args = command.args.split() if command.args else []
+    if len(args) < 2 or not args[1].isdigit():
+        await message.answer("❌ Использование: `/addpromo КОД СУММА`", parse_mode="Markdown")
+        return
+    
+    code, reward = args[0].strip(), int(args[1])
+    await create_promo_code_db(code, reward)
+    await message.answer(
+        f"🎟️ **Промокод создан!**\nКод: `{code.upper()}`\nНаграда: **{reward}** 💎 Чекушек",
+        parse_mode="Markdown"
+    )
+
 @dp.message(F.from_user.id.in_(ADMIN_IDS) & F.text)
 async def process_admin_text_commands(message: Message):
     text = message.text.strip()
     parts = text.split()
 
-    # Создание промокодов через /addpromo ПРОМО НАГРАДА или промокод ПРОМО НАГРАДА
-    if len(parts) >= 3 and parts[0].lower() in ["/addpromo", "создатьпромо", "промокод"]:
+    if len(parts) >= 3 and parts[0].lower() in ["создатьпромо", "промокод"]:
         code = parts[1].strip()
         if parts[2].isdigit():
             reward = int(parts[2])
@@ -790,7 +795,6 @@ async def process_game_bet(message: Message):
         await message.answer(f"❌ Недостаточно Чекушек! Ваш баланс: {user['balance']} 💎")
         return
 
-    # Списываем ставку перед броском
     await update_balance(message.from_user.id, -bet)
     
     emoji, game_code = game_map[game_name]
@@ -798,16 +802,9 @@ async def process_game_bet(message: Message):
     val = dice_msg.dice.value
     await asyncio.sleep(2.5)
 
-    # === ЛОГИКА ДЛЯ БОУЛИНГА ===
     if game_code == "bowling":
-        if val == 6:  # Сбиты все кегли (Страйк)
-            if bet < 10:
-                coeff = random.uniform(2.5, 3.5)
-            elif bet < 100:
-                coeff = random.uniform(2.0, 2.5)
-            else:
-                coeff = random.uniform(1.6, 2.0)
-            
+        if val == 6:
+            coeff = random.uniform(2.5, 3.5) if bet < 10 else (random.uniform(2.0, 2.5) if bet < 100 else random.uniform(1.6, 2.0))
             total_payout = int(bet * coeff)
             await update_balance(message.from_user.id, total_payout)
             new_user = await get_user(message.from_user.id)
@@ -820,14 +817,8 @@ async def process_game_bet(message: Message):
                 parse_mode="Markdown"
             )
 
-        elif val == 5:  # Сбиты все кроме 1
-            if bet < 10:
-                coeff = random.uniform(1.8, 2.2)
-            elif bet < 100:
-                coeff = random.uniform(1.5, 1.8)
-            else:
-                coeff = random.uniform(1.3, 1.5)
-
+        elif val == 5:
+            coeff = random.uniform(1.8, 2.2) if bet < 10 else (random.uniform(1.5, 1.8) if bet < 100 else random.uniform(1.3, 1.5))
             total_payout = int(bet * coeff)
             await update_balance(message.from_user.id, total_payout)
             new_user = await get_user(message.from_user.id)
@@ -840,14 +831,8 @@ async def process_game_bet(message: Message):
                 parse_mode="Markdown"
             )
 
-        elif val == 4:  # Сбиты все кроме 2
-            if bet < 10:
-                coeff = random.uniform(1.4, 1.6)
-            elif bet < 100:
-                coeff = random.uniform(1.2, 1.4)
-            else:
-                coeff = random.uniform(1.1, 1.25)
-
+        elif val == 4:
+            coeff = random.uniform(1.4, 1.6) if bet < 10 else (random.uniform(1.2, 1.4) if bet < 100 else random.uniform(1.1, 1.25))
             total_payout = int(bet * coeff)
             await update_balance(message.from_user.id, total_payout)
             new_user = await get_user(message.from_user.id)
@@ -860,7 +845,7 @@ async def process_game_bet(message: Message):
                 parse_mode="Markdown"
             )
 
-        else:  # 1, 2 или 3 кегли — Выигрыш 0
+        else:
             new_user = await get_user(message.from_user.id)
             await message.answer(
                 f"🎳 **Сбито всего {val} кегли(ей)!**\n"
@@ -870,7 +855,6 @@ async def process_game_bet(message: Message):
             )
         return
 
-    # === ЛОГИКА ДЛЯ ОСТАЛЬНЫХ ИГР (Футбол, Баскетбол, Дартс) ===
     is_win = False
     if game_code == "football" and val in [3, 4, 5]:
         is_win = True
@@ -880,13 +864,7 @@ async def process_game_bet(message: Message):
         is_win = True
 
     if is_win:
-        if bet < 10:
-            coeff = random.uniform(1.8, 2.5)
-        elif bet < 100:
-            coeff = random.uniform(1.4, 1.8)
-        else:
-            coeff = random.uniform(1.2, 1.5)
-
+        coeff = random.uniform(1.8, 2.5) if bet < 10 else (random.uniform(1.4, 1.8) if bet < 100 else random.uniform(1.2, 1.5))
         total_payout = int(bet * coeff)
         await update_balance(message.from_user.id, total_payout)
         new_user = await get_user(message.from_user.id)
