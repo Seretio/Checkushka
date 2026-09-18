@@ -718,22 +718,28 @@ async def process_admin_text_commands(message: Message):
     text = message.text.strip()
     parts = text.split()
 
-    action, amount, target_str = None, 0, None
+    first_word = parts[0].lower()
+    action = "add" if first_word in ["чекушка", "выдать", "+"] else "sub"
+    amount = 0
+    target_str = None
 
-    if len(parts) >= 3 and parts[0].lower() in ["чекушка", "выдать", "+"]:
-        if parts[1].isdigit():
-            action, amount, target_str = "add", int(parts[1]), parts[2]
-    elif len(parts) >= 3 and parts[0].lower() in ["забрать", "снять", "-"]:
-        if parts[1].isdigit():
-            action, amount, target_str = "sub", int(parts[1]), parts[2]
-    
-    if message.reply_to_message and len(parts) >= 2:
-        if parts[0].lower() in ["чекушка", "выдать", "+"] and parts[1].isdigit():
-            action, amount, target_str = "add", int(parts[1]), str(message.reply_to_message.from_user.id)
-        elif parts[0].lower() in ["забрать", "снять", "-"] and parts[1].isdigit():
-            action, amount, target_str = "sub", int(parts[1]), str(message.reply_to_message.from_user.id)
+    if message.reply_to_message:
+        target_str = str(message.reply_to_message.from_user.id)
+        for part in parts[1:]:
+            if part.isdigit():
+                amount = int(part)
+                break
+    else:
+        for part in parts[1:]:
+            if part.isdigit():
+                amount = int(part)
+            else:
+                target_str = part
 
-    if not action or amount <= 0 or not target_str:
+        if not target_str:
+            target_str = str(message.from_user.id)
+
+    if amount <= 0:
         return
 
     target_user = await get_user_by_id_or_username(target_str)
