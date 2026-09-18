@@ -621,10 +621,10 @@ async def msg_games(message: Message):
     text = (
         "🎮 Выберите игру ниже:\n\n"
         "Чтобы сделать ставку, отправьте команду с игрой и суммой ставки:\n"
-        "• `баскетбол 5`\n"
-        "• `футбол 1`\n"
-        "• `дартс 500`\n"
-        "• `боулинг 10`"
+        "• `баскетбол 5` или `баскетбол ставка 5`\n"
+        "• `футбол 1` или `футбол ставка 1`\n"
+        "• `дартс 500` или `дартс ставка 500`\n"
+        "• `боулинг 10` или `боулинг ставка 10`"
     )
     await message.answer(text, parse_mode="Markdown", reply_markup=games_keyboard())
 
@@ -761,13 +761,9 @@ async def process_game_bet(message: Message):
     if not message.text:
         return
 
-    raw_text = message.text.replace(f"@{BOT_USERNAME}", "").strip()
+    raw_text = message.text.replace(f"@{BOT_USERNAME}", "").strip().lower()
     parts = raw_text.split()
-    
-    if len(parts) != 2:
-        return
 
-    game_name, bet_str = parts[0].lower(), parts[1]
     game_map = {
         "футбол": ("⚽", "football"), 
         "баскетбол": ("🏀", "basketball"), 
@@ -775,12 +771,32 @@ async def process_game_bet(message: Message):
         "боулинг": ("🎳", "bowling")
     }
 
-    if game_name not in game_map or not bet_str.isdigit():
+    # Поиск наименования игры
+    found_game = None
+    for game_keyword in game_map.keys():
+        if game_keyword in parts:
+            found_game = game_keyword
+            break
+
+    if not found_game:
         return
 
-    bet = int(bet_str)
+    # Поиск числа (ставки) в тексте
+    bet = None
+    for part in parts:
+        if part.isdigit():
+            bet = int(part)
+            break
+
+    if bet is None:
+        await message.answer(
+            f"❌ Укажите сумму ставки цифрами!\nПример: `{found_game} 10` или `{found_game} ставка 10`",
+            parse_mode="Markdown"
+        )
+        return
+
     if bet <= 0:
-        await message.answer("Ставка должна быть больше 0!")
+        await message.answer("❌ Ставка должна быть больше 0!")
         return
 
     user, _ = await get_or_create_user(
@@ -800,16 +816,16 @@ async def process_game_bet(message: Message):
     # Списываем баланс перед броском
     await update_balance(message.from_user.id, -bet)
     
-    emoji, game_code = game_map[game_name]
+    emoji, game_code = game_map[found_game]
     
     try:
         dice_msg = await message.answer_dice(emoji=emoji)
         val = dice_msg.dice.value
     except Exception as e:
-        # Автоматический возврат ставки при ошибке отправки кубика
+        # Возврат ставки при ошибке отправки
         await update_balance(message.from_user.id, bet)
         logging.error(f"Ошибка отправки dice: {e}")
-        await message.answer("❌ Ошибка отправки анимации. Убедитесь, что у бота есть права отправлять стикеры/эмодзи. Ставка возвращена!")
+        await message.answer("❌ Ошибка отправки анимации. Убедитесь, что у бота есть права отправлять эмодзи/стикеры. Ставка возвращена!")
         return
 
     await asyncio.sleep(2.5)
