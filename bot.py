@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import logging
 import os
 import random
+import re
 import uuid
 import aiohttp
 import asyncpg
@@ -247,7 +248,8 @@ def games_keyboard():
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="⚽ Футбол", callback_data="game_football"), InlineKeyboardButton(text="🏀 Баскетбол", callback_data="game_basketball")],
-            [InlineKeyboardButton(text="🎯 Дартс", callback_data="game_darts"), InlineKeyboardButton(text="🎳 Боулинг", callback_data="game_bowling")]
+            [InlineKeyboardButton(text="🎯 Дартс", callback_data="game_darts"), InlineKeyboardButton(text="🎳 Боулинг", callback_data="game_bowling")],
+            [InlineKeyboardButton(text="🎲 Кубик", callback_data="game_dice")]
         ]
     )
 
@@ -624,7 +626,8 @@ async def msg_games(message: Message):
         "• `баскетбол 5` или `баскетбол ставка 5`\n"
         "• `футбол 1` или `футбол ставка 1`\n"
         "• `дартс 500` или `дартс ставка 500`\n"
-        "• `боулинг 10` или `боулинг ставка 10`"
+        "• `боулинг 10` или `боулинг ставка 10`\n"
+        "• `кубик 50` или `кости ставка 50`"
     )
     await message.answer(text, parse_mode="Markdown", reply_markup=games_keyboard())
 
@@ -751,53 +754,60 @@ async def process_admin_text_commands(message: Message):
 @dp.callback_query(F.data.startswith("game_"))
 async def cb_game_info(call: CallbackQuery):
     game_type = call.data.split("_")[1]
-    names = {"football": "футбол", "basketball": "баскетбол", "darts": "дартс", "bowling": "боулинг"}
-    await call.message.answer(f"Чтобы сыграть, напишите в чат: `{names.get(game_type, 'игру')} [ставка]`\nНапример: `{names.get(game_type, 'игру')} 10`", parse_mode="Markdown")
+    names = {
+        "football": "футбол", 
+        "basketball": "баскетбол", 
+        "darts": "дартс", 
+        "bowling": "боулинг",
+        "dice": "кубик"
+    }
+    game_name = names.get(game_type, "игру")
+    await call.message.answer(
+        f"Чтобы сыграть, напишите в чат: `{game_name} [ставка]`\nНапример: `{game_name} 500` или `{game_name} ставка 500`", 
+        parse_mode="Markdown"
+    )
     await call.answer()
 
-# Гибкая обработка любых вариантов написания игровой ставки
+# Регулярное выражение для строгого распознавания игровой команды
+GAME_RE = re.compile(
+    r"^(футбол|баскетбол|дартс|боулинг|кубик|кости)\s+(?:ставка\s+)?(\d+)$", 
+    re.IGNORECASE
+)
+
 @dp.message(F.text)
 async def process_game_bet(message: Message):
     if not message.text:
         return
 
+    # Очистка текста от упоминания бота при вызове в публичных группах
     raw_text = message.text.replace(f"@{BOT_USERNAME}", "").strip().lower()
-    parts = raw_text.split()
+    match = GAME_RE.match(raw_text)
 
-    game_map = {
-        "футбол": ("⚽", "football"), 
-        "баскетбол": ("🏀", "basketball"), 
-        "дартс": ("🎯", "darts"),
-        "боулинг": ("🎳", "bowling")
-    }
-
-    # Поиск наименования игры
-    found_game = None
-    for game_keyword in game_map.keys():
-        if game_keyword in parts:
-            found_game = game_keyword
-            break
-
-    if not found_game:
+    # Если текст сообщения не совпадает с шаблоном игровой команды - пропускаем дальше
+    if not match:
         return
 
-    # Поиск числа (ставки) в тексте
-    bet = None
-    for part in parts:
-        if part.isdigit():
-            bet = int(part)
-            break
-
-    if bet is None:
-        await message.answer(
-            f"❌ Укажите сумму ставки цифрами!\nПример: `{found_game} 10` или `{found_game} ставка 10`",
-            parse_mode="Markdown"
-        )
-        return
+    game_keyword = match.group(1).lower()
+    bet = int(match.group(2))
 
     if bet <= 0:
         await message.answer("❌ Ставка должна быть больше 0!")
         return
+
+    # Карта параметров игр: Emoji, технический код и время задержки до показа результатов
+    game_map = {
+        "футбол": {"emoji": "⚽", "code": "football", "delay": 3.5},
+        "баскетбол": {"emoji": "🏀", "code": "basketball", "delay": 3.5},
+        "дартс": {"emoji": "🎯", "code": "darts", "delay": 2.5},
+        "боулинг": {"emoji": "🎳", "code": "bowling", "delay": 3.5},
+        "кубик": {"emoji": "🎲", "code": "dice", "delay": 2.5},
+        "кости": {"emoji": "🎲", "code": "dice", "delay": 2.5},
+    }
+
+    game_info = game_map[game_keyword]
+    emoji = game_info["emoji"]
+    game_code = game_info["code"]
+    delay = game_info["delay"]
 
     user, _ = await get_or_create_user(
         user_id=message.from_user.id,
@@ -813,23 +823,23 @@ async def process_game_bet(message: Message):
         await message.answer(f"❌ Недостаточно Чекушек! Ваш баланс: {user['balance']} 💎")
         return
 
-    # Списываем баланс перед броском
+    # Предварительное списание ставки
     await update_balance(message.from_user.id, -bet)
-    
-    emoji, game_code = game_map[found_game]
-    
+
     try:
         dice_msg = await message.answer_dice(emoji=emoji)
         val = dice_msg.dice.value
     except Exception as e:
-        # Возврат ставки при ошибке отправки
+        # Автоматический возврат средств при ошибке Telegram API
         await update_balance(message.from_user.id, bet)
-        logging.error(f"Ошибка отправки dice: {e}")
-        await message.answer("❌ Ошибка отправки анимации. Убедитесь, что у бота есть права отправлять эмодзи/стикеры. Ставка возвращена!")
+        logging.error(f"Ошибка отправки dice ({emoji}): {e}")
+        await message.answer("❌ Ошибка отправки анимации игры. Убедитесь, что у бота есть права на отправку эмодзи/стикеров. Ставка возвращена!")
         return
 
-    await asyncio.sleep(2.5)
+    # Ожидание окончания проигрывания анимации пользователю
+    await asyncio.sleep(delay)
 
+    # 1. Логика расчёта для БОУЛИНГА
     if game_code == "bowling":
         if val == 6:
             coeff = random.uniform(2.5, 3.5) if bet < 10 else (random.uniform(2.0, 2.5) if bet < 100 else random.uniform(1.6, 2.0))
@@ -844,7 +854,6 @@ async def process_game_bet(message: Message):
                 f"Ваш баланс: {new_user['balance']} 💎",
                 parse_mode="Markdown"
             )
-
         elif val == 5:
             coeff = random.uniform(1.8, 2.2) if bet < 10 else (random.uniform(1.5, 1.8) if bet < 100 else random.uniform(1.3, 1.5))
             total_payout = int(bet * coeff)
@@ -858,7 +867,6 @@ async def process_game_bet(message: Message):
                 f"Ваш баланс: {new_user['balance']} 💎",
                 parse_mode="Markdown"
             )
-
         elif val == 4:
             coeff = random.uniform(1.4, 1.6) if bet < 10 else (random.uniform(1.2, 1.4) if bet < 100 else random.uniform(1.1, 1.25))
             total_payout = int(bet * coeff)
@@ -867,12 +875,11 @@ async def process_game_bet(message: Message):
             profit = total_payout - bet
 
             await message.answer(
-                f"👍 **ХОРОШИЙ БРОСОК! Сбиты почти все кегли (осталось 2)!**\n"
+                f"👍 **ХОРОШИЙ БРОСОК! Сбито 4 кегли!**\n"
                 f"Выигрыш: +{total_payout} 💎 Чекушек (Прибыль: +{profit} 💎)!\n"
                 f"Ваш баланс: {new_user['balance']} 💎",
                 parse_mode="Markdown"
             )
-
         else:
             new_user = await get_user(message.from_user.id)
             await message.answer(
@@ -883,29 +890,33 @@ async def process_game_bet(message: Message):
             )
         return
 
+    # 2. Логика победы для остального набора игр
     is_win = False
-    if game_code == "football" and val in [3, 4, 5]:
+    if game_code == "football" and val in [3, 4, 5]:        # Гол
         is_win = True
-    elif game_code == "basketball" and val in [4, 5]:
+    elif game_code == "basketball" and val in [4, 5]:      # Попадание
         is_win = True
-    elif game_code == "darts" and val == 6:
+    elif game_code == "darts" and val == 6:                # Яблочко / Центр
+        is_win = True
+    elif game_code == "dice" and val in [4, 5, 6]:         # Кубик 4, 5, 6
         is_win = True
 
+    # 3. Начисление и вывод результатов
     if is_win:
         coeff = random.uniform(1.8, 2.5) if bet < 10 else (random.uniform(1.4, 1.8) if bet < 100 else random.uniform(1.2, 1.5))
         total_payout = int(bet * coeff)
         await update_balance(message.from_user.id, total_payout)
         new_user = await get_user(message.from_user.id)
-        
         profit = total_payout - bet
+        
         await message.answer(
-            f"🎉 **ПОБЕДА!**\nВыигрыш: +{total_payout} 💎 Чекушек (Прибыль: +{profit} 💎)!\nВаш баланс: {new_user['balance']} 💎",
+            f"🎉 **ПОБЕДА!** (Выпало: {val})\nВыигрыш: +{total_payout} 💎 Чекушек (Прибыль: +{profit} 💎)!\nВаш баланс: {new_user['balance']} 💎",
             parse_mode="Markdown"
         )
     else:
         new_user = await get_user(message.from_user.id)
         await message.answer(
-            f"❌ **ПРОИГРЫШ!**\nВы потеряли: {bet} 💎 Чекушек.\nВаш баланс: {new_user['balance']} 💎",
+            f"❌ **ПРОИГРЫШ!** (Выпало: {val})\nВы потеряли: {bet} 💎 Чекушек.\nВаш баланс: {new_user['balance']} 💎",
             parse_mode="Markdown"
         )
 
