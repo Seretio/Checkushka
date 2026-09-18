@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 import logging
 import os
 import random
@@ -81,7 +82,8 @@ async def init_db():
                 referrer_id BIGINT,
                 ref_count INT DEFAULT 0,
                 ref_balance INT DEFAULT 0,
-                is_banned INT DEFAULT 0
+                is_banned INT DEFAULT 0,
+                last_bonus_claim TIMESTAMP WITH TIME ZONE
             );
             CREATE TABLE IF NOT EXISTS checks (
                 check_id TEXT PRIMARY KEY,
@@ -89,10 +91,22 @@ async def init_db():
                 amount INT,
                 is_activated INT DEFAULT 0
             );
+            CREATE TABLE IF NOT EXISTS promo_codes (
+                code TEXT PRIMARY KEY,
+                reward INT NOT NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS promo_activations (
+                code TEXT REFERENCES promo_codes(code) ON DELETE CASCADE,
+                user_id BIGINT REFERENCES users(user_id) ON DELETE CASCADE,
+                activated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (code, user_id)
+            );
         """)
-        # Безопасное добавление колонки bottles для существующих таблиц
+        # Безопасное добавление колонок для существующих таблиц
         await conn.execute("""
             ALTER TABLE users ADD COLUMN IF NOT EXISTS bottles INT DEFAULT 0;
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS last_bonus_claim TIMESTAMP WITH TIME ZONE;
         """)
     logging.info("База данных PostgreSQL успешно инициализирована.")
 
@@ -169,12 +183,44 @@ async def activate_check_db(check_id: str):
     async with db_pool.acquire() as conn:
         await conn.execute("UPDATE checks SET is_activated = 1 WHERE check_id = $1", check_id)
 
+# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ПРОМОКОДОВ И БОНУСА ===
+async def create_promo_code_db(code: str, reward: int):
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO promo_codes (code, reward) VALUES ($1, $2) ON CONFLICT (code) DO UPDATE SET reward = EXCLUDED.reward",
+            code.upper(), reward
+        )
+
+async def claim_promo_code_db(code: str, user_id: int):
+    code_clean = code.upper()
+    async with db_pool.acquire() as conn:
+        promo = await conn.fetchrow("SELECT * FROM promo_codes WHERE code = $1", code_clean)
+        if not promo:
+            return "NOT_FOUND", 0
+
+        already_used = await conn.fetchval(
+            "SELECT 1 FROM promo_activations WHERE code = $1 AND user_id = $2", code_clean, user_id
+        )
+        if already_used:
+            return "ALREADY_USED", 0
+
+        await conn.execute("INSERT INTO promo_activations (code, user_id) VALUES ($1, $2)", code_clean, user_id)
+        await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", promo["reward"], user_id)
+        return "SUCCESS", promo["reward"]
+
+async def update_bonus_claim_time(user_id: int):
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET last_bonus_claim = CURRENT_TIMESTAMP WHERE user_id = $1", user_id
+        )
+
 # === КЛАВИАТУРЫ ===
 def main_reply_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="🎮 Играть")],
-            [KeyboardButton(text="🛒 Магазин"), KeyboardButton(text="🔗 Рефералка")]
+            [KeyboardButton(text="🛒 Магазин"), KeyboardButton(text="🔗 Рефералка")],
+            [KeyboardButton(text="🎁 Бонус")]
         ],
         resize_keyboard=True
     )
@@ -204,6 +250,13 @@ def games_keyboard():
         inline_keyboard=[
             [InlineKeyboardButton(text="⚽ Футбол", callback_data="game_football"), InlineKeyboardButton(text="🏀 Баскетбол", callback_data="game_basketball")],
             [InlineKeyboardButton(text="🎯 Дартс", callback_data="game_darts"), InlineKeyboardButton(text="🎳 Боулинг", callback_data="game_bowling")]
+        ]
+    )
+
+def bonus_inline_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🎁 Получить бонус", callback_data="claim_daily_bonus")]
         ]
     )
 
@@ -275,6 +328,109 @@ async def cmd_start(message: Message, command: CommandObject):
         )
 
     await message.answer(start_text, reply_markup=main_reply_keyboard())
+
+# === ОБРАБОТКА ЕЖЕДНЕВНОГО БОНУСА ===
+@dp.message(F.text.lower().in_(["бонус", "🎁 бонус"]))
+async def msg_bonus(message: Message):
+    user = await get_user(message.from_user.id)
+    if not user:
+        user, _ = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
+
+    if user['is_banned']:
+        await message.answer("❌ Вы заблокированы в боте.")
+        return
+
+    text = (
+        "🎁 **Ежедневный бонус**\n\n"
+        "Вы можете получать от **10 до 60** 💎 Чекушек каждые 24 часа!\n\n"
+        "📌 **Условие:** Укажите в своем описании (био) Telegram фразу:\n"
+        "`Самая первая Чекушка @Checkushhka_Bot`"
+    )
+    await message.answer(text, parse_mode="Markdown", reply_markup=bonus_inline_keyboard())
+
+@dp.callback_query(F.data == "claim_daily_bonus")
+async def cb_claim_bonus(call: CallbackQuery):
+    user = await get_user(call.from_user.id)
+    if not user:
+        user, _ = await get_or_create_user(call.from_user.id, call.from_user.first_name, call.from_user.username)
+
+    if user['is_banned']:
+        await call.answer("❌ Вы заблокированы.", show_alert=True)
+        return
+
+    now = datetime.now(timezone.utc)
+
+    # Проверка таймера (24 часа)
+    if user["last_bonus_claim"]:
+        last_claim = user["last_bonus_claim"]
+        if last_claim.tzinfo is None:
+            last_claim = last_claim.replace(tzinfo=timezone.utc)
+            
+        next_claim = last_claim + timedelta(hours=24)
+        if now < next_claim:
+            time_left = next_claim - now
+            hours, remainder = divmod(int(time_left.total_seconds()), 3600)
+            minutes, _ = divmod(remainder, 60)
+            await call.answer(
+                f"⏳ Бонус уже получен! Следующий будет доступен через {hours} ч. {minutes} мин.",
+                show_alert=True
+            )
+            return
+
+    # Проверка БИО пользователя
+    try:
+        chat_info = await bot.get_chat(call.from_user.id)
+        user_bio = chat_info.bio or ""
+    except Exception as e:
+        logging.error(f"Ошибка получения био: {e}")
+        user_bio = ""
+
+    required_phrase = "Самая первая Чекушка @Checkushhka_Bot"
+    if required_phrase.lower() not in user_bio.lower():
+        await call.message.answer(
+            f"❌ У тебя не установлена нужная фраза в био!\nДобавь: `{required_phrase}`",
+            parse_mode="Markdown"
+        )
+        await call.answer()
+        return
+
+    # Выдача случайного бонуса
+    reward = random.randint(10, 60)
+    await update_balance(call.from_user.id, reward)
+    await update_bonus_claim_time(call.from_user.id)
+
+    await call.message.answer(
+        f"🎉 Вы получили бонус **+{reward}** 💎 Чекушек!\nВозвращайтесь через 24 часа!",
+        parse_mode="Markdown"
+    )
+    await call.answer()
+
+# === ОБРАБОТКА ПРОМОКОДОВ ИГРОКАМИ ===
+@dp.message(F.text.lower().startswith(("промо ", "промокод ")))
+async def process_promo_code(message: Message):
+    parts = message.text.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("❌ Введите промокод! Пример: `промо СТАРТ`", parse_mode="Markdown")
+        return
+
+    code_input = parts[1].strip()
+    user, _ = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
+
+    if user["is_banned"]:
+        await message.answer("❌ Вы заблокированы.")
+        return
+
+    status, reward = await claim_promo_code_db(code_input, message.from_user.id)
+
+    if status == "NOT_FOUND":
+        await message.answer("❌ Такого промокода не существует или он недействителен.")
+    elif status == "ALREADY_USED":
+        await message.answer("⚠️ Вы уже активировали этот промокод!")
+    elif status == "SUCCESS":
+        await message.answer(
+            f"🎉 **Промокод успешно активирован!**\nВам начислено **+{reward}** 💎 Чекушек!",
+            parse_mode="Markdown"
+        )
 
 # === МАГАЗИН ===
 @dp.message(Command("shop", "магазин"))
@@ -539,10 +695,23 @@ async def process_successful_payment(message: Message):
     await message.answer(f"✅ Пополнение успешно!\n💎 Баланс: {user['balance']} Чекушек", reply_markup=main_reply_keyboard())
 
 # === АДМИН-ОБРАБОТЧИК ===
+@dp.message(Command("addpromo"))
 @dp.message(F.from_user.id.in_(ADMIN_IDS) & F.text)
 async def process_admin_text_commands(message: Message):
     text = message.text.strip()
     parts = text.split()
+
+    # Создание промокодов через /addpromo ПРОМО НАГРАДА или промокод ПРОМО НАГРАДА
+    if len(parts) >= 3 and parts[0].lower() in ["/addpromo", "создатьпромо", "промокод"]:
+        code = parts[1].strip()
+        if parts[2].isdigit():
+            reward = int(parts[2])
+            await create_promo_code_db(code, reward)
+            await message.answer(
+                f"🎟️ **Промокод создан!**\nКод: `{code.upper()}`\nНаграда: **{reward}** 💎 Чекушек",
+                parse_mode="Markdown"
+            )
+            return
 
     action, amount, target_str = None, 0, None
 
@@ -595,7 +764,7 @@ async def process_game_bet(message: Message):
     game_map = {
         "футбол": ("⚽", "football"), 
         "баскетбол": ("🏀", "basketball"), 
-        "дартс": ("🎯", "darts"),
+        "darts": ("🎯", "darts"),
         "боулинг": ("🎳", "bowling")
     }
 
