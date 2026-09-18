@@ -696,7 +696,7 @@ async def cmd_add_promo(message: Message, command: CommandObject):
     code, reward = args[0].strip(), int(args[1])
     await create_promo_code_db(code, reward)
     await message.answer(
-        f"🎟️ **Промокод создан!**\nКод: `{code.upper()}`\nНаграда: **{reward}** 💎 Чекушек",
+        f"🎟️ **Промокод создал!**\nКод: `{code.upper()}`\nНаграда: **{reward}** 💎 Чекушек",
         parse_mode="Markdown"
     )
 
@@ -755,8 +755,12 @@ async def cb_game_info(call: CallbackQuery):
     await call.message.answer(f"Чтобы сыграть, напишите в чат: `{names.get(game_type, 'игру')} [ставка]`\nНапример: `{names.get(game_type, 'игру')} 10`", parse_mode="Markdown")
     await call.answer()
 
-@dp.message(F.text.lower().startswith(("футбол ", "баскетбол ", "дартс ", "боулинг ")))
+# Гибкая обработка любых вариантов написания игровой ставки
+@dp.message(F.text)
 async def process_game_bet(message: Message):
+    if not message.text:
+        return
+
     raw_text = message.text.replace(f"@{BOT_USERNAME}", "").strip()
     parts = raw_text.split()
     
