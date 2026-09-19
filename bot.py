@@ -21,7 +21,7 @@ from aiogram.types import (
 )
 
 # === НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ===
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8950292427:AAFYyNCxkhhkVfaobZEnNWYgWoSz_LpkSiI")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8950292427:AAELhAkf-ZTO01_T9CEw7oHhLrL6sKIOtdc")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "Checkushhka_Bot")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -79,6 +79,7 @@ async def init_db():
                 username TEXT,
                 balance INT DEFAULT 100,
                 bottles INT DEFAULT 0,
+                bricks INT DEFAULT 0,
                 referrer_id BIGINT,
                 ref_count INT DEFAULT 0,
                 ref_balance INT DEFAULT 0,
@@ -93,6 +94,7 @@ async def init_db():
         """)
         await conn.execute("""
             ALTER TABLE users ADD COLUMN IF NOT EXISTS bottles INT DEFAULT 0;
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS bricks INT DEFAULT 0;
         """)
     logging.info("База данных PostgreSQL успешно инициализирована.")
 
@@ -152,6 +154,10 @@ async def update_bottles(user_id: int, amount: int):
     async with db_pool.acquire() as conn:
         await conn.execute("UPDATE users SET bottles = bottles + $1 WHERE user_id = $2", amount, user_id)
 
+async def update_bricks(user_id: int, amount: int):
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE users SET bricks = bricks + $1 WHERE user_id = $2", amount, user_id)
+
 async def create_check_db(creator_id: int, amount: int) -> str:
     check_id = str(uuid.uuid4())[:8]
     async with db_pool.acquire() as conn:
@@ -185,7 +191,8 @@ def profile_inline_keyboard():
 def shop_inline_keyboard():
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🍾 Купить бутылку", callback_data="buy_bottle")]
+            [InlineKeyboardButton(text="🍾 Купить бутылку — 5 💎", callback_data="buy_bottle")],
+            [InlineKeyboardButton(text="🧱 Купить кирпич — 10 💎", callback_data="buy_brick")]
         ]
     )
 
@@ -290,7 +297,8 @@ async def msg_shop(message: Message):
     text = (
         "🛒 **МАГАЗИН**\n\n"
         "🍾 **Бутылка** — 5 Чекушек\n"
-        "Одноразовый предмет."
+        "🧱 **Кирпич** — 10 Чекушек\n\n"
+        "Предметы одноразовые. Чтобы использовать предмет, ответьте на сообщение игрока и напишите его название."
     )
     await message.answer(text, parse_mode="Markdown", reply_markup=shop_inline_keyboard())
 
@@ -312,6 +320,26 @@ async def cb_buy_bottle(call: CallbackQuery):
     await update_bottles(call.from_user.id, 1)
 
     await call.message.answer("✅ Ты купил 🍾 бутылку за 5 Чекушек!")
+    await call.answer()
+
+@dp.callback_query(F.data == "buy_brick")
+async def cb_buy_brick(call: CallbackQuery):
+    user = await get_user(call.from_user.id)
+    if not user:
+        user, _ = await get_or_create_user(call.from_user.id, call.from_user.first_name, call.from_user.username)
+
+    if user['is_banned']:
+        await call.answer("❌ Вы заблокированы.", show_alert=True)
+        return
+
+    if user["balance"] < 10:
+        await call.answer("❌ Недостаточно Чекушек! Кирпич стоит 10 Чекушек.", show_alert=True)
+        return
+
+    await update_balance(call.from_user.id, -10)
+    await update_bricks(call.from_user.id, 1)
+
+    await call.message.answer("✅ Ты купил 🧱 кирпич за 10 Чекушек!")
     await call.answer()
 
 # === РЕФЕРАЛЬНАЯ СИСТЕМА ===
@@ -415,9 +443,11 @@ async def process_create_check(message: Message):
     )
 
 # === ОБРАБОТКА КОМАНД В ЧАТАХ И ГРУППАХ ===
-@dp.message(F.text.lower().in_(["чекушка", "профиль", "👤 профиль"]))
+@dp.message(F.text.lower().in_(["чекушка", "кирпич", "профиль", "👤 профиль"]))
 async def msg_profile(message: Message):
-    if message.reply_to_message and message.text.lower().strip() == "чекушка":
+    action = message.text.lower().strip()
+
+    if message.reply_to_message and action in ["чекушка", "кирпич"]:
         attacker, _ = await get_or_create_user(
             user_id=message.from_user.id,
             first_name=message.from_user.first_name,
@@ -428,18 +458,29 @@ async def msg_profile(message: Message):
             await message.answer("❌ Вы заблокированы в боте.")
             return
 
-        if attacker.get("bottles", 0) <= 0:
-            await message.answer("❌ У вас нет 🍾 бутылки! Купите ее в магазине `/shop` за 5 Чекушек.")
-            return
-
         victim_user = message.reply_to_message.from_user
         if victim_user.id == attacker["user_id"]:
-            await message.answer("❌ Нельзя ударить самого себя!")
+            await message.answer("❌ Нельзя использовать предмет на себе!")
             return
 
-        await update_bottles(attacker["user_id"], -1)
+        if action == "чекушка":
+            if attacker.get("bottles", 0) <= 0:
+                await message.answer("❌ У вас нет 🍾 бутылки! Купите ее в магазине за 5 Чекушек.")
+                return
 
-        await message.answer(f"🍾 {attacker['first_name']} ударил {victim_user.first_name} бутылкой!")
+            await update_bottles(attacker["user_id"], -1)
+            await message.answer(
+                f"🍾 {attacker['first_name']} ударил {victim_user.first_name} бутылкой!"
+            )
+        else:
+            if attacker.get("bricks", 0) <= 0:
+                await message.answer("❌ У вас нет 🧱 кирпича! Купите его в магазине за 10 Чекушек.")
+                return
+
+            await update_bricks(attacker["user_id"], -1)
+            await message.answer(
+                f"🧱 {attacker['first_name']} кинул кирпич в {victim_user.first_name}!"
+            )
         return
 
     user = await get_user(message.from_user.id)
@@ -451,12 +492,14 @@ async def msg_profile(message: Message):
         return
 
     bottles_cnt = user.get("bottles", 0)
+    bricks_cnt = user.get("bricks", 0)
     text = (
         "👤 **Ваш профиль**\n"
         f"├ 👤 {user['first_name']}\n"
         f"├ 🆔 ID: `{user['user_id']}`\n"
         f"├ 💎 Чекушок: {user['balance']}\n"
-        f"└ 🍾 Бутылок: {bottles_cnt}"
+        f"├ 🍾 Бутылок: {bottles_cnt}\n"
+        f"└ 🧱 Кирпичей: {bricks_cnt}"
     )
     await message.answer(text, parse_mode="Markdown", reply_markup=profile_inline_keyboard())
 
