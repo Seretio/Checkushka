@@ -1,4 +1,8 @@
 import asyncio
+
+# Защита от повторной обработки одного и того же сообщения
+processed_action_messages = set()
+
 from datetime import datetime, timezone
 import logging
 import os
@@ -7,7 +11,7 @@ import uuid
 import aiohttp
 import asyncpg
 from aiohttp import web
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, F, BaseMiddleware
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     CallbackQuery,
@@ -21,7 +25,7 @@ from aiogram.types import (
 )
 
 # === НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ===
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8950292427:AAELhAkf-ZTO01_T9CEw7oHhLrL6sKIOtdc")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8950292427:AAGEWlJWD0eCCdlkffBUXoUMz2b3-fQbZcw")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "Checkushhka_Bot")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -36,6 +40,31 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 db_pool = None
+
+# === ЗАЩИТА ОТ ДУБЛИРОВАНИЯ UPDATE ===
+class DedupMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        update = data.get("event_update")
+        update_id = getattr(update, "update_id", None)
+
+        if update_id is not None and db_pool is not None:
+            async with db_pool.acquire() as conn:
+                saved_id = await conn.fetchval(
+                    """
+                    INSERT INTO processed_updates (update_id)
+                    VALUES ($1)
+                    ON CONFLICT (update_id) DO NOTHING
+                    RETURNING update_id
+                    """,
+                    update_id
+                )
+
+            # Этот update уже обработал другой экземпляр бота.
+            if saved_id is None:
+                return
+
+        return await handler(event, data)
+
 
 # === МИНИМАЛЬНЫЙ HTTP-СЕРВЕР ===
 async def handle_ping(request):
@@ -90,6 +119,10 @@ async def init_db():
                 creator_id BIGINT,
                 amount INT,
                 is_activated INT DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS processed_updates (
+                update_id BIGINT PRIMARY KEY,
+                processed_at TIMESTAMPTZ DEFAULT NOW()
             );
         """)
         await conn.execute("""
@@ -448,6 +481,11 @@ async def msg_profile(message: Message):
     action = message.text.lower().strip()
 
     if message.reply_to_message and action in ["чекушка", "кирпич"]:
+        # Telegram/диспетчер не должен повторно обрабатывать одно сообщение.
+        if message.message_id in processed_action_messages:
+            return
+        processed_action_messages.add(message.message_id)
+
         attacker, _ = await get_or_create_user(
             user_id=message.from_user.id,
             first_name=message.from_user.first_name,
@@ -786,6 +824,10 @@ async def main():
     await init_db()
     await start_http_server()
     asyncio.create_task(self_ping_task())
+
+    # Один и тот же Telegram update будет обработан только один раз,
+    # даже если случайно запущены две копии бота.
+    dp.update.outer_middleware(DedupMiddleware())
 
     print("Бот запущен на PostgreSQL!")
     await dp.start_polling(bot, allowed_updates=["message", "callback_query", "pre_checkout_query"])
