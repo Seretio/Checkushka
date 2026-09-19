@@ -207,63 +207,6 @@ def games_keyboard():
         ]
     )
 
-# === АДМИН-КОМАНДЫ (НАЧАЛО ОБРАБОТКИ) ===
-@dp.message(F.from_user.id.in_(ADMIN_IDS) & (Command("users", "stats") | F.text.lower().in_(["кто в боте", "пользователи", "юзеры", "стата", "статистика"])))
-async def cmd_admin_users_list(message: Message):
-    async with db_pool.acquire() as conn:
-        total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
-        total_balance = await conn.fetchval("SELECT COALESCE(SUM(balance), 0) FROM users")
-        users = await conn.fetch("SELECT user_id, first_name, username, balance, is_banned FROM users ORDER BY user_id DESC LIMIT 50")
-
-    text = f"📊 **Всего пользователей в боте:** {total_users}\n"
-    text += f"💎 **Всего чекушек на руках:** {total_balance}\n\n"
-    text += "📋 **Список участников (последние 50):**\n"
-
-    for idx, u in enumerate(users, start=1):
-        uname = f"@{u['username']}" if u['username'] else "нет юзернейма"
-        ban_status = " 🚫[BAN]" if u['is_banned'] else ""
-        text += f"{idx}. {u['first_name']} ({uname}) — ID: `{u['user_id']}` | 💎 {u['balance']}{ban_status}\n"
-
-    await message.answer(text, parse_mode="Markdown")
-
-@dp.message(F.from_user.id.in_(ADMIN_IDS) & F.text.lower().startswith(("чекушка ", "выдать ", "+", "забрать ", "снять ", "-")))
-async def process_admin_text_commands(message: Message):
-    text = message.text.strip()
-    parts = text.split()
-
-    first_word = parts[0].lower()
-    action = "add" if first_word in ["чекушка", "выдать", "+"] else "sub"
-    amount = 0
-    target_str = None
-
-    if message.reply_to_message:
-        target_str = str(message.reply_to_message.from_user.id)
-        for part in parts[1:]:
-            if part.isdigit():
-                amount = int(part)
-                break
-    else:
-        for part in parts[1:]:
-            if part.isdigit():
-                amount = int(part)
-            else:
-                target_str = part
-
-    if amount <= 0 or not target_str:
-        return
-
-    target_user = await get_user_by_id_or_username(target_str)
-    if not target_user:
-        await message.answer("❌ Пользователь не найден в базе бота.")
-        return
-
-    if action == "add":
-        await update_balance(target_user['user_id'], amount)
-        await message.answer(f"✅ Выдали {amount} 💎 Чекушек пользователю {target_user['first_name']}.")
-    elif action == "sub":
-        await update_balance(target_user['user_id'], -amount)
-        await message.answer(f"⚠️ Забрали {amount} 💎 Чекушек у пользователя {target_user['first_name']}.")
-
 # === СТАРТ И ОБРАБОТКА ЧЕКОВ ===
 @dp.message(CommandStart())
 async def cmd_start(message: Message, command: CommandObject):
@@ -471,9 +414,34 @@ async def process_create_check(message: Message):
         reply_markup=kb
     )
 
-# === ОБРАБОТКА ПРОФИЛЯ И АТАКИ БУТЫЛКОЙ ===
-@dp.message(F.text.lower().in_(["профиль", "👤 профиль"]))
+# === ОБРАБОТКА КОМАНД В ЧАТАХ И ГРУППАХ ===
+@dp.message(F.text.lower().in_(["чекушка", "профиль", "👤 профиль"]))
 async def msg_profile(message: Message):
+    if message.reply_to_message and message.text.lower().strip() == "чекушка":
+        attacker, _ = await get_or_create_user(
+            user_id=message.from_user.id,
+            first_name=message.from_user.first_name,
+            username=message.from_user.username
+        )
+
+        if attacker['is_banned']:
+            await message.answer("❌ Вы заблокированы в боте.")
+            return
+
+        if attacker.get("bottles", 0) <= 0:
+            await message.answer("❌ У вас нет 🍾 бутылки! Купите ее в магазине `/shop` за 5 Чекушек.")
+            return
+
+        victim_user = message.reply_to_message.from_user
+        if victim_user.id == attacker["user_id"]:
+            await message.answer("❌ Нельзя ударить самого себя!")
+            return
+
+        await update_bottles(attacker["user_id"], -1)
+
+        await message.answer(f"🍾 {attacker['first_name']} ударил {victim_user.first_name} бутылкой!")
+        return
+
     user = await get_user(message.from_user.id)
     if not user:
         user, _ = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
@@ -491,33 +459,6 @@ async def msg_profile(message: Message):
         f"└ 🍾 Бутылок: {bottles_cnt}"
     )
     await message.answer(text, parse_mode="Markdown", reply_markup=profile_inline_keyboard())
-
-@dp.message(F.text.lower() == "чекушка")
-async def msg_hit_bottle(message: Message):
-    if not message.reply_to_message:
-        return
-
-    attacker, _ = await get_or_create_user(
-        user_id=message.from_user.id,
-        first_name=message.from_user.first_name,
-        username=message.from_user.username
-    )
-
-    if attacker['is_banned']:
-        await message.answer("❌ Вы заблокированы в боте.")
-        return
-
-    if attacker.get("bottles", 0) <= 0:
-        await message.answer("❌ У вас нет 🍾 бутылки! Купите ее в магазине `/shop` за 5 Чекушек.")
-        return
-
-    victim_user = message.reply_to_message.from_user
-    if victim_user.id == attacker["user_id"]:
-        await message.answer("❌ Нельзя ударить самого себя!")
-        return
-
-    await update_bottles(attacker["user_id"], -1)
-    await message.answer(f"🍾 {attacker['first_name']} ударил {victim_user.first_name} бутылкой!")
 
 @dp.message(F.text.lower().in_(["играть", "🎮 играть"]))
 async def msg_games(message: Message):
@@ -548,7 +489,7 @@ async def msg_deposit(message: Message):
     )
     await message.answer(text, reply_markup=deposit_keyboard())
 
-# === ПОПОЛНЕНИЕ ЧЕРЕЗ TELEGRAM STARS ===
+# === ПОПОЛНЕНИЕ СТАРЗ ===
 PACKAGES = {
     "buy_50": {"amount": 50, "stars": 30, "title": "50 Чекушек"},
     "buy_100": {"amount": 100, "stars": 60, "title": "100 Чекушек"},
@@ -594,9 +535,49 @@ async def process_successful_payment(message: Message):
     user = await get_user(message.from_user.id)
     await message.answer(f"✅ Пополнение успешно!\n💎 Баланс: {user['balance']} Чекушек", reply_markup=main_reply_keyboard())
 
-# === ИГРОКОВЫЕ КНОПКИ И СТАВКИ ===
-GAME_KEYWORDS = ["футбол", "баскетбол", "дартс", "боулинг", "кубик", "кости"]
+# === АДМИН-ОБРАБОТЧИК (ЕДИНСТВЕННАЯ АДМИН-ФУНКЦИЯ: ВЫДАЧА И СНЯТИЕ БАЛАНСА) ===
+@dp.message(F.from_user.id.in_(ADMIN_IDS) & F.text.lower().startswith(("чекушка ", "выдать ", "+", "забрать ", "снять ", "-")))
+async def process_admin_text_commands(message: Message):
+    text = message.text.strip()
+    parts = text.split()
 
+    first_word = parts[0].lower()
+    action = "add" if first_word in ["чекушка", "выдать", "+"] else "sub"
+    amount = 0
+    target_str = None
+
+    if message.reply_to_message:
+        target_str = str(message.reply_to_message.from_user.id)
+        for part in parts[1:]:
+            if part.isdigit():
+                amount = int(part)
+                break
+    else:
+        for part in parts[1:]:
+            if part.isdigit():
+                amount = int(part)
+            else:
+                target_str = part
+
+        if not target_str:
+            target_str = str(message.from_user.id)
+
+    if amount <= 0:
+        return
+
+    target_user = await get_user_by_id_or_username(target_str)
+    if not target_user:
+        await message.answer("❌ Пользователь не найден в базе бота.")
+        return
+
+    if action == "add":
+        await update_balance(target_user['user_id'], amount)
+        await message.answer(f"✅ Выдали {amount} 💎 Чекушек пользователю {target_user['first_name']}.")
+    elif action == "sub":
+        await update_balance(target_user['user_id'], -amount)
+        await message.answer(f"⚠️ Забрали {amount} 💎 Чекушек у пользователя {target_user['first_name']}.")
+
+# === ИГРОКОВЫЕ КНОПКИ И СТАВКИ ===
 @dp.callback_query(F.data.startswith("game_"))
 async def cb_game_info(call: CallbackQuery):
     game_type = call.data.split("_")[1]
@@ -604,8 +585,11 @@ async def cb_game_info(call: CallbackQuery):
     await call.message.answer(f"Чтобы сыграть, напишите в чат: `{names.get(game_type, 'игру')} [ставка]`\nНапример: `{names.get(game_type, 'игру')} 10`", parse_mode="Markdown")
     await call.answer()
 
-@dp.message(F.text.func(lambda text: text and any(kw in text.lower() for kw in GAME_KEYWORDS)))
+@dp.message(F.text)
 async def process_game_bet(message: Message):
+    if not message.text:
+        return
+
     raw_text = message.text.replace(f"@{BOT_USERNAME}", "").strip().lower()
     parts = raw_text.split()
 
