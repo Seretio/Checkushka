@@ -21,7 +21,7 @@ from aiogram.types import (
 )
 
 # === НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ===
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8950292427:AAFubqblK31adjliqCw-rIVb5gMLnAGp0RA")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8950292427:AAFSAxFmSoc9VLv_DAxWifXr8IfVQ7zLIp8")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "Checkushhka_Bot")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -37,7 +37,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 db_pool = None
 
-# === МИНИМАЛЬНЫЙ HTTP-СЕРВЕР ===
+# === МИНИМАЛЬНЫЙ HTTP-СЕРВЕР (Для работы на Render/Railway) ===
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
 
@@ -489,7 +489,7 @@ async def msg_deposit(message: Message):
     )
     await message.answer(text, reply_markup=deposit_keyboard())
 
-# === ПОПОЛНЕНИЕ СТАРЗ ===
+# === ПОПОЛНЕНИЕ ЧЕРЕЗ TELEGRAM STARS ===
 PACKAGES = {
     "buy_50": {"amount": 50, "stars": 30, "title": "50 Чекушек"},
     "buy_100": {"amount": 100, "stars": 60, "title": "100 Чекушек"},
@@ -587,7 +587,6 @@ async def cb_game_info(call: CallbackQuery):
     await call.message.answer(f"Чтобы сыграть, напишите в чат: `{names.get(game_type, 'игру')} [ставка]`\nНапример: `{names.get(game_type, 'игру')} 10`", parse_mode="Markdown")
     await call.answer()
 
-# Фильтр изменен с F.text на явную проверку игровых слов
 @dp.message(F.text.func(lambda text: any(kw in text.lower() for kw in GAME_KEYWORDS)))
 async def process_game_bet(message: Message):
     if not message.text:
