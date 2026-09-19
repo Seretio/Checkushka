@@ -501,7 +501,7 @@ async def msg_profile(message: Message):
             await message.answer("❌ Нельзя использовать предмет на себе!")
             return
 
-        if action == "чекушка":
+        if action == "бутылка":
             if attacker.get("bottles", 0) <= 0:
                 await message.answer("❌ У вас нет 🍾 бутылки! Купите ее в магазине за 5 Чекушек.")
                 return
