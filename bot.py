@@ -144,6 +144,14 @@ async def get_user(user_id: int):
     async with db_pool.acquire() as conn:
         return await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
 
+async def get_all_users():
+    async with db_pool.acquire() as conn:
+        return await conn.fetch("SELECT * FROM users")
+
+async def set_user_ban_status(user_id: int, is_banned: int):
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE users SET is_banned = $1 WHERE user_id = $2", is_banned, user_id)
+
 async def update_balance(user_id: int, amount: int):
     async with db_pool.acquire() as conn:
         await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", amount, user_id)
@@ -535,7 +543,52 @@ async def process_successful_payment(message: Message):
     user = await get_user(message.from_user.id)
     await message.answer(f"✅ Пополнение успешно!\n💎 Баланс: {user['balance']} Чекушек", reply_markup=main_reply_keyboard())
 
-# === АДМИН-ОБРАБОТЧИК (ВЫДАЧА / СНЯТИЕ ЧЕКУШЕК) ===
+# === АДМИН-ОБРАБОТЧИКИ ===
+@dp.message(F.from_user.id.in_(ADMIN_IDS) & (Command("users") | F.text.lower().in_(["кто в боте", "пользователи", "юзеры"])))
+async def process_admin_list_users(message: Message):
+    users = await get_all_users()
+    total_count = len(users)
+
+    if total_count == 0:
+        await message.answer("👥 В боте пока нет зарегистрированных пользователей.")
+        return
+
+    text = f"👥 **Всего пользователей в боте:** {total_count}\n\n**Список (первые 50):**\n"
+    for idx, u in enumerate(users[:50], 1):
+        username_str = f"@{u['username']}" if u['username'] else "без юзернейма"
+        ban_status = " 🚫 (Забанен)" if u['is_banned'] else ""
+        text += f"{idx}. {u['first_name']} | ID: `{u['user_id']}` | {username_str}{ban_status}\n"
+
+    await message.answer(text, parse_mode="Markdown")
+
+@dp.message(F.from_user.id.in_(ADMIN_IDS) & F.text.lower().startswith(("бан ", "разбан ")))
+async def process_admin_ban_unban(message: Message):
+    text = message.text.strip()
+    parts = text.split()
+    action = parts[0].lower()
+
+    target_str = None
+    if message.reply_to_message:
+        target_str = str(message.reply_to_message.from_user.id)
+    elif len(parts) >= 2:
+        target_str = parts[1]
+
+    if not target_str:
+        await message.answer("❌ Укажите ID, @username или ответьте на сообщение пользователя.")
+        return
+
+    target_user = await get_user_by_id_or_username(target_str)
+    if not target_user:
+        await message.answer("❌ Пользователь не найден в базе данных.")
+        return
+
+    if action == "бан":
+        await set_user_ban_status(target_user['user_id'], 1)
+        await message.answer(f"🚫 Пользователь **{target_user['first_name']}** (`{target_user['user_id']}`) заблокирован.", parse_mode="Markdown")
+    elif action == "разбан":
+        await set_user_ban_status(target_user['user_id'], 0)
+        await message.answer(f"✅ Пользователь **{target_user['first_name']}** (`{target_user['user_id']}`) разблокирован.", parse_mode="Markdown")
+
 @dp.message(F.from_user.id.in_(ADMIN_IDS) & F.text.lower().startswith(("чекушка ", "выдать ", "+", "забрать ", "снять ", "-")))
 async def process_admin_text_commands(message: Message):
     text = message.text.strip()
