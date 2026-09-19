@@ -25,7 +25,7 @@ from aiogram.types import (
 )
 
 # === НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ===
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8950292427:AAGYhfx1tXEBhjLTtQZ9hkT_iX8d2w5y9Uo")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8950292427:AAFEE9DHR4ctXeueHjKuZoYM9ulwDjWLAkg")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "Checkushhka_Bot")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -123,6 +123,19 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS processed_updates (
                 update_id BIGINT PRIMARY KEY,
                 processed_at TIMESTAMPTZ DEFAULT NOW()
+            );
+            CREATE TABLE IF NOT EXISTS promo_codes (
+                code TEXT PRIMARY KEY,
+                amount INT NOT NULL,
+                max_activations INT NOT NULL,
+                activations INT DEFAULT 0,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+            CREATE TABLE IF NOT EXISTS promo_uses (
+                code TEXT NOT NULL,
+                user_id BIGINT NOT NULL,
+                used_at TIMESTAMPTZ DEFAULT NOW(),
+                PRIMARY KEY (code, user_id)
             );
         """)
         await conn.execute("""
@@ -312,6 +325,110 @@ async def cmd_banned(message: Message):
         name = f"@{user['username']}" if user['username'] else user['first_name']
         lines.append(f"{i}. {name} — `{user['user_id']}`")
     await message.answer("\n".join(lines), parse_mode="Markdown")
+
+# === ПРОМОКОДЫ ===
+@dp.message(Command("createpromo", "создатьпромо"))
+async def cmd_create_promo(message: Message, command: CommandObject):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("❌ У вас нет прав для этой команды.")
+        return
+
+    parts = command.args.split() if command.args else []
+    if len(parts) != 3 or not parts[1].isdigit() or not parts[2].isdigit():
+        await message.answer(
+            "❌ Использование:\n"
+            "/createpromo ПРОМОКОД КОЛИЧЕСТВО_АКТИВАЦИЙ ЧЕКУШКИ\n\n"
+            "Пример:\n"
+            "/createpromo CHEK100 20 100"
+        )
+        return
+
+    code = parts[0].upper()
+    max_activations = int(parts[1])
+    amount = int(parts[2])
+
+    if max_activations <= 0 or amount <= 0:
+        await message.answer("❌ Количество активаций и Чекушек должны быть больше 0.")
+        return
+
+    async with db_pool.acquire() as conn:
+        try:
+            await conn.execute(
+                "INSERT INTO promo_codes (code, amount, max_activations) VALUES ($1, $2, $3)",
+                code, amount, max_activations
+            )
+        except asyncpg.UniqueViolationError:
+            await message.answer("❌ Такой промокод уже существует.")
+            return
+
+    await message.answer(
+        f"✅ Промокод создан!\n\n"
+        f"🎟 Код: `{code}`\n"
+        f"💎 Награда: {amount} Чекушек\n"
+        f"👥 Активаций: {max_activations}",
+        parse_mode="Markdown"
+    )
+
+
+@dp.message(Command("promo", "промо", "промокод"))
+async def cmd_use_promo(message: Message, command: CommandObject):
+    user, _ = await get_or_create_user(
+        message.from_user.id,
+        message.from_user.first_name,
+        message.from_user.username
+    )
+
+    if user["is_banned"]:
+        await message.answer("❌ Вы заблокированы в боте.")
+        return
+
+    code = command.args.strip().upper() if command.args else ""
+    if not code:
+        await message.answer("❌ Использование: /promo ПРОМОКОД")
+        return
+
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            promo = await conn.fetchrow(
+                "SELECT * FROM promo_codes WHERE code = $1 FOR UPDATE",
+                code
+            )
+
+            if not promo:
+                await message.answer("❌ Промокод не найден.")
+                return
+
+            if promo["activations"] >= promo["max_activations"]:
+                await message.answer("❌ Лимит активаций этого промокода исчерпан.")
+                return
+
+            already_used = await conn.fetchval(
+                "SELECT 1 FROM promo_uses WHERE code = $1 AND user_id = $2",
+                code, user["user_id"]
+            )
+            if already_used:
+                await message.answer("❌ Вы уже активировали этот промокод.")
+                return
+
+            await conn.execute(
+                "INSERT INTO promo_uses (code, user_id) VALUES ($1, $2)",
+                code, user["user_id"]
+            )
+            await conn.execute(
+                "UPDATE promo_codes SET activations = activations + 1 WHERE code = $1",
+                code
+            )
+            await conn.execute(
+                "UPDATE users SET balance = balance + $1 WHERE user_id = $2",
+                promo["amount"], user["user_id"]
+            )
+
+    await message.answer(
+        f"🎉 Промокод `{code}` активирован!\n"
+        f"💎 Вы получили **{promo['amount']} Чекушек**!",
+        parse_mode="Markdown"
+    )
+
 
 # === СТАРТ И ОБРАБОТКА ЧЕКОВ ===
 @dp.message(CommandStart())
