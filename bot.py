@@ -480,7 +480,7 @@ async def process_create_check(message: Message):
 async def msg_profile(message: Message):
     action = message.text.lower().strip()
 
-    if message.reply_to_message and action in ["чекушка", "кирпич"]:
+    if message.reply_to_message and action in ["бутылка", "кирпич"]:
         # Telegram/диспетчер не должен повторно обрабатывать одно сообщение.
         if message.message_id in processed_action_messages:
             return
