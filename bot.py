@@ -21,9 +21,7 @@ from aiogram.types import (
 )
 
 # === НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ===
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN не задан в переменных окружения Render")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8950292427:AAHiJ26IAGA4cTwC4OAnJU3DxZUVE8Ld7xg")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "Checkushhka_Bot")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -72,9 +70,7 @@ async def init_db():
     if url and url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
 
-    if not url:
-        raise RuntimeError("DATABASE_URL не задан в переменных окружения Render")
-    db_pool = await asyncpg.create_pool(dsn=url, min_size=1, max_size=10, command_timeout=30)
+    db_pool = await asyncpg.create_pool(dsn=url)
     async with db_pool.acquire() as conn:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -90,17 +86,9 @@ async def init_db():
             );
             CREATE TABLE IF NOT EXISTS checks (
                 check_id TEXT PRIMARY KEY,
-                creator_id BIGINT NOT NULL,
-                amount INT NOT NULL CHECK (amount > 0),
-                is_activated INT NOT NULL DEFAULT 0,
-                activated_by BIGINT,
-                activated_at TIMESTAMPTZ
-            );
-            CREATE TABLE IF NOT EXISTS processed_payments (
-                telegram_charge_id TEXT PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                amount INT NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                creator_id BIGINT,
+                amount INT,
+                is_activated INT DEFAULT 0
             );
         """)
         await conn.execute("""
@@ -156,23 +144,9 @@ async def get_user(user_id: int):
     async with db_pool.acquire() as conn:
         return await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
 
-async def update_balance(user_id: int, amount: int) -> bool:
+async def update_balance(user_id: int, amount: int):
     async with db_pool.acquire() as conn:
-        if amount < 0:
-            row = await conn.fetchrow(
-                """UPDATE users
-                   SET balance = balance + $1
-                   WHERE user_id = $2 AND balance + $1 >= 0
-                   RETURNING balance""", amount, user_id
-            )
-        else:
-            row = await conn.fetchrow(
-                """UPDATE users
-                   SET balance = balance + $1
-                   WHERE user_id = $2
-                   RETURNING balance""", amount, user_id
-            )
-        return row is not None
+        await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", amount, user_id)
 
 async def update_bottles(user_id: int, amount: int):
     async with db_pool.acquire() as conn:
@@ -191,14 +165,9 @@ async def get_check_db(check_id: str):
     async with db_pool.acquire() as conn:
         return await conn.fetchrow("SELECT * FROM checks WHERE check_id = $1", check_id)
 
-async def activate_check_db(check_id: str, activated_by: int):
+async def activate_check_db(check_id: str):
     async with db_pool.acquire() as conn:
-        return await conn.fetchrow(
-            """UPDATE checks
-               SET is_activated = 1, activated_by = $2, activated_at = NOW()
-               WHERE check_id = $1 AND is_activated = 0
-               RETURNING *""", check_id, activated_by
-        )
+        await conn.execute("UPDATE checks SET is_activated = 1 WHERE check_id = $1", check_id)
 
 # === КЛАВИАТУРЫ ===
 def main_reply_keyboard():
@@ -265,13 +234,8 @@ async def cmd_start(message: Message, command: CommandObject):
             await message.answer("❌ Вы заблокированы в боте.")
             return
 
-        activated_check = await activate_check_db(check_id, receiver["user_id"])
-        if not activated_check:
-            await message.answer("⚠️ Этот чек уже был кем-то активирован.")
-            return
-        if not await update_balance(receiver["user_id"], check["amount"]):
-            await message.answer("❌ Не удалось начислить чекушки. Обратитесь к администратору.")
-            return
+        await activate_check_db(check_id)
+        await update_balance(receiver["user_id"], check["amount"])
 
         await message.answer(f"🎉 Вы активировали чек на **{check['amount']}** 💎 Чекушек!", parse_mode="Markdown")
 
@@ -408,13 +372,8 @@ async def process_transfer(message: Message):
         await message.answer("❌ Нельзя переводить Чекушки самому себе!")
         return
 
-    if not await update_balance(sender["user_id"], -amount):
-        await message.answer("❌ Недостаточно Чекушек: баланс изменился. Попробуйте снова.")
-        return
-    if not await update_balance(target_user["user_id"], amount):
-        await update_balance(sender["user_id"], amount)
-        await message.answer("❌ Не удалось выполнить перевод. Средства возвращены.")
-        return
+    await update_balance(sender["user_id"], -amount)
+    await update_balance(target_user["user_id"], amount)
 
     await message.answer(
         f"✅ Вы успешно перевели {amount} 💎 Чекушек пользователю {target_user['first_name']}!"
@@ -443,16 +402,8 @@ async def process_create_check(message: Message):
         await message.answer(f"❌ Недостаточно Чекушек для создания чека! Ваш баланс: {sender['balance']} 💎")
         return
 
-    if not await update_balance(sender["user_id"], -amount):
-        await message.answer("❌ Недостаточно Чекушек: баланс изменился. Попробуйте снова.")
-        return
-    try:
-        check_id = await create_check_db(sender["user_id"], amount)
-    except Exception:
-        await update_balance(sender["user_id"], amount)
-        logging.exception("Не удалось создать чек")
-        await message.answer("❌ Не удалось создать чек. Средства возвращены.")
-        return
+    await update_balance(sender["user_id"], -amount)
+    check_id = await create_check_db(sender["user_id"], amount)
     
     check_link = f"https://t.me/{BOT_USERNAME}?start=check_{check_id}"
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎁 Забрать чек", url=check_link)]])
@@ -477,7 +428,7 @@ async def msg_profile(message: Message):
             await message.answer("❌ Вы заблокированы в боте.")
             return
 
-        if (attacker["bottles"] or 0) <= 0:
+        if attacker.get("bottles", 0) <= 0:
             await message.answer("❌ У вас нет 🍾 бутылки! Купите ее в магазине `/shop` за 5 Чекушек.")
             return
 
@@ -499,7 +450,7 @@ async def msg_profile(message: Message):
         await message.answer("❌ Вы заблокированы в боте.")
         return
 
-    bottles_cnt = user["bottles"] or 0
+    bottles_cnt = user.get("bottles", 0)
     text = (
         "👤 **Ваш профиль**\n"
         f"├ 👤 {user['first_name']}\n"
@@ -578,42 +529,13 @@ async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery):
 
 @dp.message(F.successful_payment)
 async def process_successful_payment(message: Message):
-    payment = message.successful_payment
-    try:
-        added_amount = int(payment.invoice_payload.split("_")[1])
-    except (ValueError, IndexError):
-        logging.error("Некорректный payload платежа: %s", payment.invoice_payload)
-        await message.answer("❌ Ошибка платежа. Обратитесь к администратору.")
-        return
-
-    async with db_pool.acquire() as conn:
-        async with conn.transaction():
-            inserted = await conn.fetchrow(
-                """INSERT INTO processed_payments (telegram_charge_id, user_id, amount)
-                   VALUES ($1, $2, $3)
-                   ON CONFLICT (telegram_charge_id) DO NOTHING
-                   RETURNING telegram_charge_id""",
-                payment.telegram_payment_charge_id,
-                message.from_user.id,
-                added_amount,
-            )
-            if inserted:
-                await conn.execute(
-                    "UPDATE users SET balance = balance + $1 WHERE user_id = $2",
-                    added_amount,
-                    message.from_user.id,
-                )
-
+    payload = message.successful_payment.invoice_payload
+    added_amount = int(payload.split("_")[1])
+    await update_balance(message.from_user.id, added_amount)
     user = await get_user(message.from_user.id)
-    if not user:
-        await message.answer("❌ Пользователь не найден. Обратитесь к администратору.")
-        return
-    await message.answer(
-        f"✅ Пополнение успешно!\n💎 Баланс: {user['balance']} Чекушек",
-        reply_markup=main_reply_keyboard(),
-    )
+    await message.answer(f"✅ Пополнение успешно!\n💎 Баланс: {user['balance']} Чекушек", reply_markup=main_reply_keyboard())
 
-# === АДМИН-ОБРАБОТЧИК (ВЫДАЧА / СНЯТИЕ ЧЕКУШЕК) ===
+# === АДМИН-ОБРАБОТЧИК ===
 @dp.message(F.from_user.id.in_(ADMIN_IDS) & F.text.lower().startswith(("чекушка ", "выдать ", "+", "забрать ", "снять ", "-")))
 async def process_admin_text_commands(message: Message):
     text = message.text.strip()
@@ -652,12 +574,12 @@ async def process_admin_text_commands(message: Message):
         await update_balance(target_user['user_id'], amount)
         await message.answer(f"✅ Выдали {amount} 💎 Чекушек пользователю {target_user['first_name']}.")
     elif action == "sub":
-        if await update_balance(target_user['user_id'], -amount):
-            await message.answer(f"⚠️ Забрали {amount} 💎 Чекушек у пользователя {target_user['first_name']}.")
-        else:
-            await message.answer("❌ У пользователя недостаточно Чекушек.")
+        await update_balance(target_user['user_id'], -amount)
+        await message.answer(f"⚠️ Забрали {amount} 💎 Чекушек у пользователя {target_user['first_name']}.")
 
 # === ИГРОКОВЫЕ КНОПКИ И СТАВКИ ===
+GAME_KEYWORDS = ["футбол", "баскетбол", "дартс", "боулинг", "кубик", "кости"]
+
 @dp.callback_query(F.data.startswith("game_"))
 async def cb_game_info(call: CallbackQuery):
     game_type = call.data.split("_")[1]
@@ -665,7 +587,8 @@ async def cb_game_info(call: CallbackQuery):
     await call.message.answer(f"Чтобы сыграть, напишите в чат: `{names.get(game_type, 'игру')} [ставка]`\nНапример: `{names.get(game_type, 'игру')} 10`", parse_mode="Markdown")
     await call.answer()
 
-@dp.message(F.text)
+# Фильтр изменен с F.text на явную проверку игровых слов
+@dp.message(F.text.func(lambda text: any(kw in text.lower() for kw in GAME_KEYWORDS)))
 async def process_game_bet(message: Message):
     if not message.text:
         return
@@ -722,10 +645,8 @@ async def process_game_bet(message: Message):
         await message.answer(f"❌ Недостаточно Чекушек! Ваш баланс: {user['balance']} 💎")
         return
 
-    if not await update_balance(message.from_user.id, -bet):
-        await message.answer("❌ Недостаточно Чекушек: баланс изменился. Попробуйте снова.")
-        return
-
+    await update_balance(message.from_user.id, -bet)
+    
     emoji, game_code = game_map[found_game]
     
     try:
@@ -822,29 +743,12 @@ async def process_game_bet(message: Message):
 
 # === ЗАПУСК ===
 async def main():
-    try:
-        await init_db()
-        await start_http_server()
-        asyncio.create_task(self_ping_task())
+    await init_db()
+    await start_http_server()
+    asyncio.create_task(self_ping_task())
 
-        # Если ранее был установлен webhook, polling не будет получать сообщения.
-        # Удаляем его перед запуском polling.
-        await bot.delete_webhook(drop_pending_updates=False)
-        me = await bot.get_me()
-        logging.info("Подключён бот: @%s (id=%s)", me.username, me.id)
-        logging.info("Бот запущен. Ожидание сообщений...")
-
-        await dp.start_polling(
-            bot,
-            allowed_updates=["message", "callback_query", "pre_checkout_query"],
-        )
-    except Exception:
-        logging.exception("КРИТИЧЕСКАЯ ОШИБКА ПРИ ЗАПУСКЕ БОТА")
-        raise
-    finally:
-        if db_pool is not None:
-            await db_pool.close()
-        await bot.session.close()
+    print("Бот запущен на PostgreSQL!")
+    await dp.start_polling(bot, allowed_updates=["message", "callback_query", "pre_checkout_query"])
 
 if __name__ == "__main__":
     asyncio.run(main())
