@@ -535,7 +535,7 @@ async def process_successful_payment(message: Message):
     user = await get_user(message.from_user.id)
     await message.answer(f"✅ Пополнение успешно!\n💎 Баланс: {user['balance']} Чекушек", reply_markup=main_reply_keyboard())
 
-# === АДМИН-ОБРАБОТЧИК (ЕДИНСТВЕННАЯ АДМИН-ФУНКЦИЯ: ВЫДАЧА И СНЯТИЕ БАЛАНСА) ===
+# === АДМИН-ОБРАБОТЧИК (ВЫДАЧА / СНЯТИЕ ЧЕКУШЕК) ===
 @dp.message(F.from_user.id.in_(ADMIN_IDS) & F.text.lower().startswith(("чекушка ", "выдать ", "+", "забрать ", "снять ", "-")))
 async def process_admin_text_commands(message: Message):
     text = message.text.strip()
