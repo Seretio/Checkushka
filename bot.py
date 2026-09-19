@@ -82,8 +82,7 @@ async def init_db():
                 referrer_id BIGINT,
                 ref_count INT DEFAULT 0,
                 ref_balance INT DEFAULT 0,
-                is_banned INT DEFAULT 0,
-                last_active TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                is_banned INT DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS checks (
                 check_id TEXT PRIMARY KEY,
@@ -94,7 +93,6 @@ async def init_db():
         """)
         await conn.execute("""
             ALTER TABLE users ADD COLUMN IF NOT EXISTS bottles INT DEFAULT 0;
-            ALTER TABLE users ADD COLUMN IF NOT EXISTS last_active TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
         """)
     logging.info("База данных PostgreSQL успешно инициализирована.")
 
@@ -112,7 +110,7 @@ async def get_or_create_user(user_id: int, first_name: str, username: str = None
                     valid_referrer = None
 
             await conn.execute(
-                "INSERT INTO users (user_id, first_name, username, balance, bottles, referrer_id, last_active) VALUES ($1, $2, $3, 100, 0, $4, NOW())",
+                "INSERT INTO users (user_id, first_name, username, balance, bottles, referrer_id) VALUES ($1, $2, $3, 100, 0, $4)",
                 user_id, first_name, username, valid_referrer
             )
 
@@ -131,11 +129,6 @@ async def get_or_create_user(user_id: int, first_name: str, username: str = None
                     pass
 
             user = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
-        else:
-            await conn.execute(
-                "UPDATE users SET first_name = $1, username = $2, last_active = NOW() WHERE user_id = $3",
-                first_name, username, user_id
-            )
 
     return user, is_new
 
@@ -175,15 +168,6 @@ async def get_check_db(check_id: str):
 async def activate_check_db(check_id: str):
     async with db_pool.acquire() as conn:
         await conn.execute("UPDATE checks SET is_activated = 1 WHERE check_id = $1", check_id)
-
-async def get_bot_users_stats():
-    async with db_pool.acquire() as conn:
-        total_count = await conn.fetchval("SELECT COUNT(*) FROM users")
-        banned_count = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_banned = 1")
-        users_list = await conn.fetch(
-            "SELECT user_id, first_name, username, balance, bottles, is_banned FROM users ORDER BY user_id DESC LIMIT 50"
-        )
-        return total_count, banned_count, users_list
 
 # === КЛАВИАТУРЫ ===
 def main_reply_keyboard():
@@ -291,83 +275,13 @@ async def cmd_start(message: Message, command: CommandObject):
 
     await message.answer(start_text, reply_markup=main_reply_keyboard())
 
-# === АДМИН-ОБРАБОТЧИКИ (КТО В БОТЕ, ВЫДАЧА И СНЯТИЕ БАЛАНСА) ===
-@dp.message(F.from_user.id.in_(ADMIN_IDS) & (F.text.lower().in_(["кто в боте", "юзеры", "пользователи", "стата", "список"]) | F.text.startswith("/users")))
-async def process_admin_who_in_bot(message: Message):
-    total, banned, users = await get_bot_users_stats()
-    active_count = total - banned
-
-    text_lines = [
-        "📊 **Статистика пользователей бота**",
-        f"├ 👥 Всего в базе: **{total}**",
-        f"├ ✅ Активных: **{active_count}**",
-        f"└ 🚫 Заблокировано: **{banned}**\n",
-        "📋 **Список пользователей (последние 50):**"
-    ]
-
-    for idx, u in enumerate(users, start=1):
-        uname = f"@{u['username']}" if u['username'] else "нет юзернейма"
-        status = "🚫" if u['is_banned'] else "👤"
-        text_lines.append(
-            f"{idx}. {status} **{u['first_name']}** ({uname})\n"
-            f"   └ ID: `{u['user_id']}` | Баланс: {u['balance']} 💎 | Бутылок: {u['bottles']}"
-        )
-
-    response_text = "\n".join(text_lines)
-
-    # Разделение, если превышает лимит длины сообщения Telegram (4096 символов)
-    if len(response_text) > 4000:
-        for i in range(0, len(response_text), 4000):
-            await message.answer(response_text[i:i + 4000], parse_mode="Markdown")
-    else:
-        await message.answer(response_text, parse_mode="Markdown")
-
-@dp.message(F.from_user.id.in_(ADMIN_IDS) & F.text.lower().startswith(("чекушка ", "выдать ", "+", "забрать ", "снять ", "-")))
-async def process_admin_text_commands(message: Message):
-    text = message.text.strip()
-    parts = text.split()
-
-    first_word = parts[0].lower()
-    action = "add" if first_word in ["чекушка", "выдать", "+"] else "sub"
-    amount = 0
-    target_str = None
-
-    if message.reply_to_message:
-        target_str = str(message.reply_to_message.from_user.id)
-        for part in parts[1:]:
-            if part.isdigit():
-                amount = int(part)
-                break
-    else:
-        for part in parts[1:]:
-            if part.isdigit():
-                amount = int(part)
-            else:
-                target_str = part
-
-        if not target_str:
-            target_str = str(message.from_user.id)
-
-    if amount <= 0:
-        return
-
-    target_user = await get_user_by_id_or_username(target_str)
-    if not target_user:
-        await message.answer("❌ Пользователь не найден в базе бота.")
-        return
-
-    if action == "add":
-        await update_balance(target_user['user_id'], amount)
-        await message.answer(f"✅ Выдали {amount} 💎 Чекушек пользователю {target_user['first_name']}.")
-    elif action == "sub":
-        await update_balance(target_user['user_id'], -amount)
-        await message.answer(f"⚠️ Забрали {amount} 💎 Чекушек у пользователя {target_user['first_name']}.")
-
 # === МАГАЗИН ===
 @dp.message(Command("shop", "магазин"))
 @dp.message(F.text.lower().in_(["магазин", "🛒 магазин"]))
 async def msg_shop(message: Message):
-    user, _ = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
+    user = await get_user(message.from_user.id)
+    if not user:
+        user, _ = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
 
     if user['is_banned']:
         await message.answer("❌ Вы заблокированы в боте.")
@@ -382,7 +296,9 @@ async def msg_shop(message: Message):
 
 @dp.callback_query(F.data == "buy_bottle")
 async def cb_buy_bottle(call: CallbackQuery):
-    user, _ = await get_or_create_user(call.from_user.id, call.from_user.first_name, call.from_user.username)
+    user = await get_user(call.from_user.id)
+    if not user:
+        user, _ = await get_or_create_user(call.from_user.id, call.from_user.first_name, call.from_user.username)
 
     if user['is_banned']:
         await call.answer("❌ Вы заблокированы.", show_alert=True)
@@ -401,7 +317,9 @@ async def cb_buy_bottle(call: CallbackQuery):
 # === РЕФЕРАЛЬНАЯ СИСТЕМА ===
 @dp.message(F.text.lower().in_(["рефералка", "🔗 рефералка", "рефералы"]))
 async def msg_referral(message: Message):
-    user, _ = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
+    user = await get_user(message.from_user.id)
+    if not user:
+        user, _ = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
 
     if user['is_banned']:
         await message.answer("❌ Вы заблокированы в боте.")
@@ -524,7 +442,9 @@ async def msg_profile(message: Message):
         await message.answer(f"🍾 {attacker['first_name']} ударил {victim_user.first_name} бутылкой!")
         return
 
-    user, _ = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
+    user = await get_user(message.from_user.id)
+    if not user:
+        user, _ = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
 
     if user['is_banned']:
         await message.answer("❌ Вы заблокированы в боте.")
@@ -542,7 +462,7 @@ async def msg_profile(message: Message):
 
 @dp.message(F.text.lower().in_(["играть", "🎮 играть"]))
 async def msg_games(message: Message):
-    user, _ = await get_or_create_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
+    user = await get_user(message.from_user.id)
     if user and user['is_banned']:
         await message.answer("❌ Вы заблокированы в боте.")
         return
@@ -614,6 +534,48 @@ async def process_successful_payment(message: Message):
     await update_balance(message.from_user.id, added_amount)
     user = await get_user(message.from_user.id)
     await message.answer(f"✅ Пополнение успешно!\n💎 Баланс: {user['balance']} Чекушек", reply_markup=main_reply_keyboard())
+
+# === АДМИН-ОБРАБОТЧИК (ЕДИНСТВЕННАЯ АДМИН-ФУНКЦИЯ: ВЫДАЧА И СНЯТИЕ БАЛАНСА) ===
+@dp.message(F.from_user.id.in_(ADMIN_IDS) & F.text.lower().startswith(("чекушка ", "выдать ", "+", "забрать ", "снять ", "-")))
+async def process_admin_text_commands(message: Message):
+    text = message.text.strip()
+    parts = text.split()
+
+    first_word = parts[0].lower()
+    action = "add" if first_word in ["чекушка", "выдать", "+"] else "sub"
+    amount = 0
+    target_str = None
+
+    if message.reply_to_message:
+        target_str = str(message.reply_to_message.from_user.id)
+        for part in parts[1:]:
+            if part.isdigit():
+                amount = int(part)
+                break
+    else:
+        for part in parts[1:]:
+            if part.isdigit():
+                amount = int(part)
+            else:
+                target_str = part
+
+        if not target_str:
+            target_str = str(message.from_user.id)
+
+    if amount <= 0:
+        return
+
+    target_user = await get_user_by_id_or_username(target_str)
+    if not target_user:
+        await message.answer("❌ Пользователь не найден в базе бота.")
+        return
+
+    if action == "add":
+        await update_balance(target_user['user_id'], amount)
+        await message.answer(f"✅ Выдали {amount} 💎 Чекушек пользователю {target_user['first_name']}.")
+    elif action == "sub":
+        await update_balance(target_user['user_id'], -amount)
+        await message.answer(f"⚠️ Забрали {amount} 💎 Чекушек у пользователя {target_user['first_name']}.")
 
 # === ИГРОКОВЫЕ КНОПКИ И СТАВКИ ===
 @dp.callback_query(F.data.startswith("game_"))
@@ -741,7 +703,7 @@ async def process_game_bet(message: Message):
         else:
             new_user = await get_user(message.from_user.id)
             await message.answer(
-                f" bowling **Сбито всего {val} кегли(ей)!**\n"
+                f"🎳 **Сбито всего {val} кегли(ей)!**\n"
                 f"Выигрыш: **0 💎 Чекушек**.\n"
                 f"Ваш баланс: {new_user['balance']} 💎",
                 parse_mode="Markdown"
