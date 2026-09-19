@@ -151,7 +151,7 @@ async def get_or_create_user(user_id: int, first_name: str, username: str = None
 
             if valid_referrer:
                 await conn.execute(
-                    "UPDATE users SET balance = balance + 1, ref_count = ref_count + 1, ref_balance = ref_balance + 1 WHERE user_id = $1",
+                    "UPDATE users SET balance = balance + 5, ref_count = ref_count + 1, ref_balance = ref_balance + 5 WHERE user_id = $1",
                     valid_referrer
                 )
                 try:
