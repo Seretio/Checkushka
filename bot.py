@@ -157,7 +157,7 @@ async def get_or_create_user(user_id: int, first_name: str, username: str = None
                 try:
                     await bot.send_message(
                         chat_id=valid_referrer,
-                        text=f"👤 Пользователь **{first_name}** перешел по твоей реферальной ссылке! Начислена 1 💎 Чекушка.",
+                        text=f"👤 Пользователь **{first_name}** перешел по твоей реферальной ссылке! Начислена 5 💎 Чекушка.",
                         parse_mode="Markdown"
                     )
                 except Exception:
@@ -390,7 +390,7 @@ async def msg_referral(message: Message):
     
     text = (
         "🔗 **Реферальная программа**\n\n"
-        f"Приглашайте друзей и получайте **1 💎 Чекушку** за каждого зашедшего пользователя!\n\n"
+        f"Приглашайте друзей и получайте **5 💎 Чекушку** за каждого зашедшего пользователя!\n\n"
         f"👥 Приглашено рефералов: **{user['ref_count']}**\n"
         f"💰 Заработано с рефералов: **{user['ref_balance']}** 💎\n\n"
         f"Ваша реферальная ссылка:\n`{ref_link}`"
