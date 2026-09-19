@@ -476,7 +476,7 @@ async def process_create_check(message: Message):
     )
 
 # === ОБРАБОТКА КОМАНД В ЧАТАХ И ГРУППАХ ===
-@dp.message(F.text.lower().in_(["чекушка", "кирпич", "профиль", "👤 профиль"]))
+@dp.message(F.text.lower().in_(["бутылка", "кирпич", "профиль", "👤 профиль"]))
 async def msg_profile(message: Message):
     action = message.text.lower().strip()
 
