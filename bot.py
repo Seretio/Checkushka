@@ -25,7 +25,7 @@ from aiogram.types import (
 )
 
 # === НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ===
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8950292427:AAEwZaprUHZ2aBBmRIEwe5N9c8aED8hL0VQ")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8950292427:AAGYhfx1tXEBhjLTtQZ9hkT_iX8d2w5y9Uo")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "Checkushhka_Bot")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -246,6 +246,72 @@ def games_keyboard():
             [InlineKeyboardButton(text="🎯 Дартс", callback_data="game_darts"), InlineKeyboardButton(text="🎳 Боулинг", callback_data="game_bowling")]
         ]
     )
+
+# === АДМИН-КОМАНДЫ БАНА ===
+@dp.message(Command("ban"))
+async def cmd_ban(message: Message, command: CommandObject):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("❌ У вас нет прав для этой команды.")
+        return
+    target = None
+    if message.reply_to_message:
+        u = message.reply_to_message.from_user
+        target = await get_user(u.id)
+        if not target:
+            target, _ = await get_or_create_user(u.id, u.first_name, u.username)
+    elif command.args:
+        target = await get_user_by_id_or_username(command.args.split()[0])
+    if not target:
+        await message.answer("❌ Пользователь не найден. Использование: /ban @username, /ban ID или ответом на сообщение /ban")
+        return
+    if target["user_id"] in ADMIN_IDS:
+        await message.answer("❌ Нельзя заблокировать администратора.")
+        return
+    if target["is_banned"]:
+        await message.answer("⚠️ Пользователь уже заблокирован.")
+        return
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE users SET is_banned = 1 WHERE user_id = $1", target["user_id"])
+    name = f"@{target['username']}" if target["username"] else target["first_name"]
+    await message.answer(f"🔨 Пользователь {name} заблокирован.")
+
+@dp.message(Command("unban"))
+async def cmd_unban(message: Message, command: CommandObject):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("❌ У вас нет прав для этой команды.")
+        return
+    target = None
+    if message.reply_to_message:
+        u = message.reply_to_message.from_user
+        target = await get_user(u.id)
+    elif command.args:
+        target = await get_user_by_id_or_username(command.args.split()[0])
+    if not target:
+        await message.answer("❌ Пользователь не найден. Использование: /unban @username, /unban ID или ответом на сообщение /unban")
+        return
+    if not target["is_banned"]:
+        await message.answer("⚠️ Пользователь не заблокирован.")
+        return
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE users SET is_banned = 0 WHERE user_id = $1", target["user_id"])
+    name = f"@{target['username']}" if target["username"] else target["first_name"]
+    await message.answer(f"✅ Пользователь {name} разблокирован.")
+
+@dp.message(Command("banned"))
+async def cmd_banned(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("❌ У вас нет прав для этой команды.")
+        return
+    async with db_pool.acquire() as conn:
+        users = await conn.fetch("SELECT user_id, first_name, username FROM users WHERE is_banned = 1 ORDER BY user_id")
+    if not users:
+        await message.answer("📋 Заблокированных пользователей нет.")
+        return
+    lines = ["🚫 **Заблокированные пользователи:**", ""]
+    for i, user in enumerate(users, 1):
+        name = f"@{user['username']}" if user['username'] else user['first_name']
+        lines.append(f"{i}. {name} — `{user['user_id']}`")
+    await message.answer("\n".join(lines), parse_mode="Markdown")
 
 # === СТАРТ И ОБРАБОТКА ЧЕКОВ ===
 @dp.message(CommandStart())
