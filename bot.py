@@ -822,12 +822,29 @@ async def process_game_bet(message: Message):
 
 # === ЗАПУСК ===
 async def main():
-    await init_db()
-    await start_http_server()
-    asyncio.create_task(self_ping_task())
+    try:
+        await init_db()
+        await start_http_server()
+        asyncio.create_task(self_ping_task())
 
-    print("Бот запущен на PostgreSQL!")
-    await dp.start_polling(bot, allowed_updates=["message", "callback_query", "pre_checkout_query"])
+        # Если ранее был установлен webhook, polling не будет получать сообщения.
+        # Удаляем его перед запуском polling.
+        await bot.delete_webhook(drop_pending_updates=False)
+        me = await bot.get_me()
+        logging.info("Подключён бот: @%s (id=%s)", me.username, me.id)
+        logging.info("Бот запущен. Ожидание сообщений...")
+
+        await dp.start_polling(
+            bot,
+            allowed_updates=["message", "callback_query", "pre_checkout_query"],
+        )
+    except Exception:
+        logging.exception("КРИТИЧЕСКАЯ ОШИБКА ПРИ ЗАПУСКЕ БОТА")
+        raise
+    finally:
+        if db_pool is not None:
+            await db_pool.close()
+        await bot.session.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
