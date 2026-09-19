@@ -25,7 +25,7 @@ from aiogram.types import (
 )
 
 # === НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ===
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8950292427:AAEwZaprUHZ2aBBmRIEwe5N9c8aED8hL0VQ")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8950292427:AAGQYzNnEByXnMR1vpg-KFp2pNViZMdYUq8")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "Checkushhka_Bot")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
